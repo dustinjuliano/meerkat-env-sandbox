@@ -1,0 +1,62 @@
+- We are designing an enhancement for programming language M
+- M uses block scoping
+- M has service types
+	- Services must not be nested
+	- Services exist only at the top-level of the namespace
+	- Services are tracked in a mutable context as shared state
+		- Problem: The shared state of services, values, and names are not encapsulated behind an API
+		- It is desired to create a single interface to regulate access to this state
+		- At the same time, it would be ideal to have a single data structure or module design that can handle these needs while also addressing the additional challenges that are about to be discussed
+- M has mixed phases
+	- M blurs the static and dynamic phase distinction
+		- M must support having its code, types, and data transmitted over networks
+		- M must support type-safe live code updates (TSLCU)
+			- This is stronger than just hot code swapping due to:
+				- The ability to change data structure, shape, schema, and types
+				- The type safety requirements
+				- Dependency graphs, which are dependent on types and may be brought to the type level eventually
+	- M must perform static checks when a program is loaded
+		- Programs can be loaded via file system, network, or REPL
+			- The loading of programs should be abstracted and restricted to a single interface to separate concerns
+		- Idea: Create single points for loading and storing programs for M virtual machines and interpreters
+		- Once a program passes these checks, the program is loaded into memory and can be executed
+		- We should not treat useful information from static checks as disposable
+	- M performs dependency analysis on variables in service definitions
+		- Depends on block scope calculations
+			- Current implementation has no concept of types for services
+				- We would like to introduce this, but it needs a block scope system (BSS) first
+- TSLCU supervenes on block scope system (BSS)
+	- Granularity
+		- Levels
+			- Service
+			- Service.Field
+		- All other parts of programs below those levels are updated in full
+		- Parts of programs at and above the service level can be updated incrementally
+	- TSLCU can affect both types and their implementations
+	- The BSS must support efficent and safe changes at the appropriate levels of granularity
+		- Idea: BSS that allows branching and merge operations
+- M has a String interning system and uses unique Symbol identifiers
+- Block scope system (BSS)
+	- Must make use of the interning system and its Symbols
+	- Must support TSLCU and its requirements
+	- Should be used in the virtual machine or interpreter
+	- Must be used to to implement static name resolution
+	- Problem: current implementation of M has no centralized M
+		- Description
+			- Inefficient data structures and algorithms
+			- No central location
+			- Difficult to maintain
+			- No encapsulation or interface boundaries
+		- Solution: unified BSS to be used for all these purposes, including in the virtual machine or interpreter
+	- Should be usable in
+		- Static name resolution
+		- Service registration and tracking
+		- Dependency analysis
+		- Closure flattening
+		- Network code
+		- Evaluation
+	- Idea: allow the entries in the BSS to have both Value and Type
+		- Supports mixed phases
+		- Can be used in all parts of the implementation for M
+		- Must be efficient and flexible enough
+	- Could make BSS generic, parameterized by T
