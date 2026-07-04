@@ -1,4 +1,2 @@
-mod env;
-
 fn main() {
 }
