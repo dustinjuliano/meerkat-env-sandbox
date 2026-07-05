@@ -1,6 +1,6 @@
 //! Block scope tree iterators and lexical resolution cursors
 
-use super::{Context, BlockId, RegionId, Symbol, EntryId};
+use super::{Context, BlockId, Symbol, EntryId};
 
 /// Immutable iterator and cursor over the block scope tree
 #[derive(Clone, Copy)]
@@ -69,18 +69,6 @@ impl<'a> Iter<'a> {
     None
   }
 
-  /// Returns the region identifier of the current block
-  ///
-  /// Returns:
-  ///     `RegionId`: The active region identifier
-  pub fn region_id(&self) -> RegionId {
-    if self.i.0 == 0 {
-      RegionId(0)
-    } else {
-      let idx = (self.i.0 as usize) - 1;
-      self.context.block_arena[idx].region
-    }
-  }
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -229,40 +217,6 @@ impl<'a> IterMut<'a> {
     }
   }
 
-  /// Converts this mutable iterator to an immutable one
-  ///
-  /// Returns:
-  ///     `Iter<'_>`: The immutable iterator view
-  pub fn as_readonly(&self) -> Iter<'_> {
-    Iter {
-      context: self.context,
-      i: self.i,
-    }
-  }
-
-  /// Returns the region identifier of the current block
-  ///
-  /// Returns:
-  ///     `RegionId`: The active region identifier
-  pub fn region_id(&self) -> RegionId {
-    if self.i.0 == 0 {
-      RegionId(0)
-    } else {
-      let idx = (self.i.0 as usize) - 1;
-      self.context.block_arena[idx].region
-    }
-  }
-
-  /// Allocates a child region under the current block scope
-  ///
-  /// Args:
-  ///     size (`u32`): The size of the region to allocate
-  ///
-  /// Returns:
-  ///     `RegionId`: The allocated child region identifier
-  pub fn region_alloc_child(&mut self, size: u32) -> RegionId {
-    self.context.region_alloc_child(size, self.i)
-  }
 }
 
 #[cfg(test)]
@@ -277,7 +231,6 @@ mod tests {
     
     let mut root = context.iter(r).unwrap();
     assert_eq!(root.i.0, 1);
-    assert_eq!(root.region_id(), r);
     assert!(root.up().is_none());
     assert!(root.down().is_none());
   }
@@ -327,7 +280,6 @@ mod tests {
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.push(); // creates 2
     assert_eq!(iter_mut.i.0, 2);
-    assert_eq!(iter_mut.region_id(), r);
 
     iter_mut.up().unwrap();
     assert_eq!(iter_mut.i.0, 1);
@@ -364,9 +316,6 @@ mod tests {
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.bind(Symbol(5), EntryId(50));
     assert_eq!(iter_mut.find(Symbol(5)), Some(EntryId(50)));
-    
-    let iter = iter_mut.as_readonly();
-    assert_eq!(iter.i.0, 1);
   }
 
   /// Verifies correct sentinel handlings for iterators at block `0`
@@ -379,7 +328,6 @@ mod tests {
     };
     assert!(invalid_iter.up().is_none());
     assert!(invalid_iter.down().is_none());
-    assert_eq!(invalid_iter.region_id().0, 0);
 
     let mut context_mut = Context::new();
     let mut invalid_iter_mut1 = IterMut {
@@ -399,8 +347,6 @@ mod tests {
       i: BlockId(0),
     };
     assert!(!invalid_iter_mut3.step_sibling());
-    assert_eq!(invalid_iter_mut3.region_id().0, 0);
-    
     invalid_iter_mut3.push();
     invalid_iter_mut3.bind(Symbol(1), EntryId(1));
   }
