@@ -5,7 +5,7 @@
 ///
 /// Lightweight type-safe wrapper around a `u32` value
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct BlockId(pub u32);
+pub(super) struct BlockId(pub(super) u32);
 
 /// Range of blocks in the freelist
 #[derive(Clone, Copy, Debug, Default)]
@@ -53,39 +53,39 @@ mod tests {
   #[test]
   fn test_context_link_up() {
     let mut context = Context::new();
-    let r = context.region_alloc(2);
+    let r = context.region_alloc(2).unwrap();
     
     // Parent link block 1 to block 2
     context.link_up(BlockId(1), BlockId(2));
-    let iter = context.iter(r).unwrap();
-    let parent = iter.up();
-    assert_eq!(parent.unwrap().block_id().0, 2);
+    let mut iter = context.iter(r).unwrap();
+    iter.up().unwrap();
+    assert_eq!(iter.i.0, 2);
   }
 
   /// Verifies child linkage updates for blocks
   #[test]
   fn test_context_link_down() {
     let mut context = Context::new();
-    let r = context.region_alloc(2);
+    let r = context.region_alloc(2).unwrap();
     
     // Link parent 1 to child 2
     context.link_down(BlockId(1), BlockId(2));
-    let iter = context.iter(r).unwrap();
-    let child = iter.down();
-    assert_eq!(child.unwrap().block_id().0, 2);
+    let mut iter = context.iter(r).unwrap();
+    iter.down().unwrap();
+    assert_eq!(iter.i.0, 2);
   }
 
   /// Verifies sibling linkage updates for blocks
   #[test]
   fn test_context_link_next() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     // Link sibling 1 to 2
     context.link_next(BlockId(1), BlockId(2));
     let mut iter = context.iter(r).unwrap();
     let _ = iter.next(); // Consume block 1
-    assert_eq!(iter.block_id().0, 2);
+    assert_eq!(iter.i.0, 2);
   }
 }
 

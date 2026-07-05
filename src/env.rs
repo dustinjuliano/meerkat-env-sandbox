@@ -1,18 +1,39 @@
 //! Environment context managing block allocations and tracking
+//!
+//! # Sentinel conventions
+//!
+//! - [`BlockId(0)`](BlockId) is the null/sentinel value. Every arena access first
+//!   checks `id.0 != 0` before computing an index.
+//! - [`RegionId(0)`](RegionId) is **not** a sentinel; slot 0 is a valid live region.
+//!   Do not treat `RegionId(0)` as "no region".
 
-use std::collections::HashMap;
-
-pub(super) mod region;
-pub(super) mod block;
-pub(super) mod alloc;
-pub use self::block::BlockId;
+mod alloc;
+mod block;
+pub mod iter;
+mod region;
+use self::block::BlockId;
 use self::block::Interval;
-
-pub(super) mod iter;
+use std::collections::HashMap;
 pub use self::iter::{Iter, IterMut};
+use alloc::BlockAllocator;
 
-/// The maximum block identifier allowed due to half-open ranges
+/// The maximum block identifier that may appear as the `begin` of an interval.
+///
+/// Block IDs participate in half-open interval arithmetic: every allocation
+/// produces `end = begin + size`, and `end` must fit in `u32`. Therefore the
+/// largest usable `begin` value is `u32::MAX - 1`; a range starting there with
+/// `size = 1` yields `end = u32::MAX`, which still fits. Allowing `begin =
+/// u32::MAX` would make even a single-block allocation overflow.
 pub const MAX_BLOCK_ID: u32 = u32::MAX - 1;
+
+/// The maximum number of live regions (i.e. the maximum valid `RegionId`).
+///
+/// Region IDs are plain array indices; they are never used in range arithmetic
+/// and `RegionId(0)` is a valid live region (no sentinel). The full `u32`
+/// space `[0, u32::MAX]` is therefore usable, so the limit is `u32::MAX`
+/// rather than `u32::MAX - 1`. The `-1` pattern from `MAX_BLOCK_ID` does
+/// **not** apply here.
+pub const MAX_REGION_ID: u32 = u32::MAX;
 
 /// A unique identifier for regions
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -31,7 +52,7 @@ pub struct Context {
   block_arena: Vec<block::Block>,
   region_arena: Vec<region::Region>,
   region_freelist: Vec<u32>,
-  allocator: alloc::BlockAllocator,
+  allocator: BlockAllocator,
 }
 
 impl Default for Context {
@@ -44,7 +65,7 @@ impl Default for Context {
       block_arena: Vec::new(),
       region_arena: Vec::new(),
       region_freelist: Vec::new(),
-      allocator: alloc::BlockAllocator::new(),
+      allocator: BlockAllocator::new(),
     }
   }
 }
@@ -59,7 +80,7 @@ impl Context {
   }
 
   /// Allocates a block range of size from the freelist or arena
-  fn alloc_block_range(&mut self, size: u32) -> Interval {
+  fn alloc_block_range(&mut self, size: u32) -> Option<Interval> {
     self.allocator.alloc_block_range(size, &mut self.block_arena)
   }
 
@@ -70,13 +91,16 @@ impl Context {
   ///
   /// Returns:
   ///     `RegionId`: A handle to the allocated region
-  pub fn region_alloc(&mut self, size: u32) -> RegionId {
-    let interval = self.alloc_block_range(size);
+  pub fn region_alloc(&mut self, size: u32) -> Option<RegionId> {
+    let interval = self.alloc_block_range(size)?;
     let region_id = if let Some(idx) = self.region_freelist.pop() {
       self.region_arena[idx as usize].intervals.push(interval);
       self.region_arena[idx as usize].active_interval_used = 0;
       RegionId(idx)
     } else {
+      if self.region_arena.len() > MAX_REGION_ID as usize {
+        return None;
+      }
       let idx = self.region_arena.len() as u32;
       self.region_arena.push(region::Region {
         intervals: vec![interval],
@@ -90,10 +114,11 @@ impl Context {
       let idx = region_id.0 as usize;
       self.region_arena[idx].active_interval_used = 1;
       let root_block = interval.begin;
+      debug_assert!(root_block.0 != 0, "allocator must never produce BlockId(0)");
       self.block_arena[(root_block.0 as usize) - 1].region = region_id;
     }
 
-    region_id
+    Some(region_id)
   }
 
   /// Releases a region handle and returns its blocks to the freelist
@@ -127,15 +152,19 @@ impl Context {
   ///
   /// Returns:
   ///     `BlockId`: The allocated block identifier
-  pub(super) fn alloc_block_in_region(
+  fn alloc_block_in_region(
     &mut self,
     region_id: RegionId,
-  ) -> BlockId {
+  ) -> Option<BlockId> {
     let idx = region_id.0 as usize;
     {
       let region = &mut self.region_arena[idx];
       let has_space = if let Some(last_interval) = region.intervals.last()
       {
+        debug_assert!(
+          last_interval.end.0 >= last_interval.begin.0,
+          "interval invariant violated"
+        );
         let size = (last_interval.end.0) - (last_interval.begin.0);
         region.active_interval_used < size
       } else {
@@ -145,7 +174,7 @@ impl Context {
       if has_space {
         region.active_interval_used += 1;
       } else {
-        let new_interval = self.alloc_block_range(1);
+        let new_interval = self.alloc_block_range(1)?;
         let region = &mut self.region_arena[idx];
         region.intervals.push(new_interval);
         region.active_interval_used = 1;
@@ -153,7 +182,15 @@ impl Context {
     }
 
     let region = &self.region_arena[idx];
+    debug_assert!(
+      region.active_interval_used > 0,
+      "active_interval_used underflow: implementation error"
+    );
     let offset = (region.active_interval_used) - 1;
+    debug_assert!(
+      !region.intervals.is_empty(),
+      "alloc_block_in_region: region has no intervals; implementation error"
+    );
     let begin_val = region.intervals.last().unwrap().begin.0;
     let new_block_id = BlockId(begin_val + offset);
 
@@ -165,7 +202,7 @@ impl Context {
     }
     self.block_arena[block_idx].region = region_id;
 
-    new_block_id
+    Some(new_block_id)
   }
 
   /// Spawns an iterator starting at the region's begin block
@@ -219,12 +256,17 @@ impl Context {
   ///
   /// Returns:
   ///     `RegionId`: The allocated child region identifier
-  pub fn region_alloc_child(
+  fn region_alloc_child(
     &mut self,
     size: u32,
     parent: BlockId,
-  ) -> RegionId {
-    let region_id = self.region_alloc(size);
+  ) -> Option<RegionId> {
+    debug_assert!(size > 0, "region_alloc_child: size must be > 0");
+    let region_id = self.region_alloc(size)?;
+    debug_assert!(
+      !self.region_arena[region_id.0 as usize].intervals.is_empty(),
+      "region_alloc_child: region has no intervals after alloc; implementation error"
+    );
     let root = self.region_arena[region_id.0 as usize]
       .intervals
       .first()
@@ -252,7 +294,7 @@ impl Context {
         }
       }
     }
-    region_id
+    Some(region_id)
   }
 
   /// Returns the size of the allocated region
@@ -266,8 +308,12 @@ impl Context {
     let idx = id.0 as usize;
     if idx < (self.region_arena.len()) {
       let r = &self.region_arena[idx];
-      let mut total = 0;
+      let mut total = 0u32;
       for interval in &r.intervals {
+        debug_assert!(
+          interval.end.0 >= interval.begin.0,
+          "interval invariant violated"
+        );
         total += (interval.end.0) - (interval.begin.0);
       }
       if total > 0 {
@@ -292,7 +338,7 @@ impl Context {
   ///
   /// Returns:
   ///     `Option<RegionId>`: The owning region identifier if valid
-  pub fn block_region(&self, block: BlockId) -> Option<RegionId> {
+  fn get_region_id_from_block(&self, block: BlockId) -> Option<RegionId> {
     if (block.0 != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -317,7 +363,7 @@ impl Context {
   ///
   /// Returns:
   ///     `Option<(BlockId, BlockId)>`: The boundaries of the interval
-  pub fn block_freelist_interval(
+  fn block_freelist_interval(
     &self,
     idx: usize,
   ) -> Option<(BlockId, BlockId)> {
@@ -332,7 +378,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The block identifier to link
   ///     parent (`BlockId`): The parent block identifier
-  pub(super) fn link_up(&mut self, block: BlockId, parent: BlockId) {
+  fn link_up(&mut self, block: BlockId, parent: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -345,7 +391,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The parent block identifier
   ///     child (`BlockId`): The child block identifier
-  pub(super) fn link_down(&mut self, block: BlockId, child: BlockId) {
+  fn link_down(&mut self, block: BlockId, child: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -358,7 +404,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The block identifier to link
   ///     next (`BlockId`): The sibling block identifier
-  pub(super) fn link_next(&mut self, block: BlockId, next: BlockId) {
+  fn link_next(&mut self, block: BlockId, next: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -375,7 +421,7 @@ mod tests {
   #[test]
   fn test_backing_space_complexity_monotone_frontiers() {
     let mut context = Context::new();
-    let r1 = context.region_alloc(10);
+    let r1 = context.region_alloc(10).unwrap();
     assert_eq!(context.block_arena.len(), 10);
     context.region_free(r1);
   }
@@ -384,11 +430,11 @@ mod tests {
   #[test]
   fn test_freelist_swap_remove_o1_complexity() {
     let mut context = Context::new();
-    let r_a = context.region_alloc(5);
-    let sep1 = context.region_alloc(1);
-    let r_b = context.region_alloc(15);
-    let sep2 = context.region_alloc(1);
-    let r_c = context.region_alloc(25);
+    let r_a = context.region_alloc(5).unwrap();
+    let sep1 = context.region_alloc(1).unwrap();
+    let r_b = context.region_alloc(15).unwrap();
+    let sep2 = context.region_alloc(1).unwrap();
+    let r_c = context.region_alloc(25).unwrap();
 
     context.region_free(r_a);
     context.region_free(r_b);
@@ -399,7 +445,7 @@ mod tests {
     assert_eq!(context.allocator.block_freelist[1].begin.0, 7);
     assert_eq!(context.allocator.block_freelist[2].begin.0, 23);
 
-    let r_alloc = context.region_alloc(12);
+    let r_alloc = context.region_alloc(12).unwrap();
 
     assert_eq!(context.allocator.block_freelist.len(), 3);
     assert_eq!(context.allocator.block_freelist[1].begin.0, 23);
@@ -422,10 +468,10 @@ mod tests {
   #[test]
   fn test_alloc_block_range_exact_match() {
     let mut context = Context::new();
-    let r1 = context.region_alloc(10);
+    let r1 = context.region_alloc(10).unwrap();
     context.region_free(r1);
     
-    let r2 = context.region_alloc(10);
+    let r2 = context.region_alloc(10).unwrap();
     assert_eq!(r2.0, 0);
   }
 
@@ -433,10 +479,10 @@ mod tests {
   #[test]
   fn test_alloc_block_range_partial_match() {
     let mut context = Context::new();
-    let r1 = context.region_alloc(10);
+    let r1 = context.region_alloc(10).unwrap();
     context.region_free(r1);
     
-    let _r2 = context.region_alloc(6);
+    let _r2 = context.region_alloc(6).unwrap();
     assert_eq!(context.block_freelist_len(), 1);
     assert_eq!(context.block_freelist_interval(0).unwrap().0.0, 7);
     assert_eq!(context.block_freelist_interval(0).unwrap().1.0, 11);
@@ -446,11 +492,11 @@ mod tests {
   #[test]
   fn test_region_freelist_reuse() {
     let mut context = Context::new();
-    let r1 = context.region_alloc(5);
-    let _r2 = context.region_alloc(5);
+    let r1 = context.region_alloc(5).unwrap();
+    let _r2 = context.region_alloc(5).unwrap();
     
     context.region_free(r1);
-    let r3 = context.region_alloc(5);
+    let r3 = context.region_alloc(5).unwrap();
     assert_eq!(r3, r1);
   }
 
@@ -476,8 +522,8 @@ mod tests {
   fn test_introspection_invalid_inputs() {
     let context = Context::new();
     assert_eq!(context.region_size(RegionId(999)), None);
-    assert_eq!(context.block_region(BlockId(999)), None);
-    assert_eq!(context.block_region(BlockId(0)), None);
+    assert_eq!(context.get_region_id_from_block(BlockId(999)), None);
+    assert_eq!(context.get_region_id_from_block(BlockId(0)), None);
     assert_eq!(context.block_freelist_interval(999), None);
   }
 
@@ -485,24 +531,32 @@ mod tests {
   #[test]
   fn test_region_alloc_child_invalid_parent() {
     let mut context = Context::new();
-    let _r = context.region_alloc_child(2, BlockId(0));
+    let _r = context.region_alloc_child(2, BlockId(0)).unwrap();
     assert_eq!(context.block_arena[0].up.0, 0);
     
-    let r2 = context.region_alloc_child(2, BlockId(999));
-    assert_eq!(context.block_region(BlockId(3)), Some(r2));
+    let r2 = context.region_alloc_child(2, BlockId(999)).unwrap();
+    assert_eq!(context.get_region_id_from_block(BlockId(3)), Some(r2));
+  }
+
+  /// Verifies that `region_alloc_child` panics on zero size (caller contract)
+  #[test]
+  #[should_panic(expected = "size must be > 0")]
+  fn test_region_alloc_child_zero_size_panics() {
+    let mut context = Context::new();
+    context.region_alloc_child(0, BlockId(0));
   }
 
   /// Verifies disjoint range allocation when active interval is full
   #[test]
   fn test_alloc_block_in_region_disjoint_allocation() {
     let mut context = Context::new();
-    let r = context.region_alloc(2);
+    let r = context.region_alloc(2).unwrap();
     let mut iter_mut = context.iter_mut(r).unwrap();
     
-    iter_mut.push();
+    iter_mut.push().unwrap();
     
-    iter_mut.push();
-    assert_eq!(iter_mut.block_id().0, 3);
+    iter_mut.push().unwrap();
+    assert_eq!(iter_mut.i.0, 3);
     assert_eq!(context.region_size(r), Some(3));
   }
 
@@ -510,7 +564,7 @@ mod tests {
   #[test]
   fn test_zero_sized_region_size_introspection() {
     let mut context = Context::new();
-    let r = context.region_alloc(0);
+    let r = context.region_alloc(0).unwrap();
     assert_eq!(context.region_size(r), None);
   }
 }
