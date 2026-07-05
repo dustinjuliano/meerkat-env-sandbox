@@ -57,9 +57,9 @@ mod tests {
     
     // Parent link block 1 to block 2
     context.link_up(BlockId(1), BlockId(2));
-    let mut iter = context.iter(r).unwrap();
-    iter.up().unwrap();
-    assert_eq!(iter.i.0, 2);
+    let mut cursor = context.cursor(r).unwrap();
+    context.up(&mut cursor).unwrap();
+    assert_eq!(cursor.i.0, 2);
   }
 
   /// Verifies child linkage updates for blocks
@@ -70,9 +70,9 @@ mod tests {
     
     // Link parent 1 to child 2
     context.link_down(BlockId(1), BlockId(2));
-    let mut iter = context.iter(r).unwrap();
-    iter.down().unwrap();
-    assert_eq!(iter.i.0, 2);
+    let mut cursor = context.cursor(r).unwrap();
+    context.down(&mut cursor).unwrap();
+    assert_eq!(cursor.i.0, 2);
   }
 
   /// Verifies sibling linkage updates for blocks
@@ -83,9 +83,9 @@ mod tests {
     
     // Link sibling 1 to 2
     context.link_next(BlockId(1), BlockId(2));
-    let mut iter = context.iter(r).unwrap();
-    let _ = iter.next(); // Consume block 1
-    assert_eq!(iter.i.0, 2);
+    let mut cursor = context.cursor(r).unwrap();
+    context.next(&mut cursor).unwrap();
+    assert_eq!(cursor.i.0, 2);
   }
 }
 

@@ -11,12 +11,21 @@ pub(super) struct BlockAllocator {
 impl BlockAllocator {
   /// Creates a new empty block allocator
   pub(super) fn new() -> Self {
+    Self::default()
+  }
+}
+
+impl Default for BlockAllocator {
+  /// Creates a default block allocator starting at BlockId(1)
+  fn default() -> Self {
     BlockAllocator {
       block_freelist: Vec::new(),
       block_next_id: BlockId(1),
     }
   }
+}
 
+impl BlockAllocator {
   /// Allocates a range of block identifiers
   ///
   /// Args:
@@ -82,12 +91,16 @@ impl BlockAllocator {
 mod tests {
   use super::*;
 
-  /// Verifies default initialization of `BlockAllocator`
+  /// Verifies default initialization and new() of `BlockAllocator`
   #[test]
   fn test_new() {
     let alloc = BlockAllocator::new();
     assert_eq!(alloc.block_freelist.len(), 0);
     assert_eq!(alloc.block_next_id.0, 1);
+
+    let def = BlockAllocator::default();
+    assert_eq!(def.block_freelist.len(), 0);
+    assert_eq!(def.block_next_id.0, 1);
   }
 
   /// Verifies block range allocation when the freelist is empty
