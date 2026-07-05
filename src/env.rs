@@ -9,12 +9,12 @@
 
 mod alloc;
 mod block;
-pub mod iter;
+pub mod cursor;
 mod region;
 use self::block::BlockId;
 use self::block::Interval;
 use std::collections::HashMap;
-pub use self::iter::{Iter, IterMut};
+pub use self::cursor::Cursor;
 use alloc::BlockAllocator;
 
 /// The maximum block identifier that may appear as the `begin` of an interval.
@@ -92,6 +92,9 @@ impl Context {
   /// Returns:
   ///     `RegionId`: A handle to the allocated region
   pub fn region_alloc(&mut self, size: u32) -> Option<RegionId> {
+    if size == 0 {
+      return None;
+    }
     let interval = self.alloc_block_range(size)?;
     let region_id = if let Some(idx) = self.region_freelist.pop() {
       self.region_arena[idx as usize].intervals.push(interval);
@@ -176,8 +179,18 @@ impl Context {
       } else {
         let new_interval = self.alloc_block_range(1)?;
         let region = &mut self.region_arena[idx];
-        region.intervals.push(new_interval);
-        region.active_interval_used = 1;
+        let mut coalesced = false;
+        if let Some(last_interval) = region.intervals.last_mut() {
+          if last_interval.end.0 == new_interval.begin.0 {
+            last_interval.end = new_interval.end;
+            region.active_interval_used += 1;
+            coalesced = true;
+          }
+        }
+        if !coalesced {
+          region.intervals.push(new_interval);
+          region.active_interval_used = 1;
+        }
       }
     }
 
@@ -187,6 +200,8 @@ impl Context {
       "active_interval_used underflow: implementation error"
     );
     let offset = (region.active_interval_used) - 1;
+    // Safety: The region is guaranteed to have at least one interval because either has_space was true
+    // (so an interval already existed) or a new interval was successfully allocated and pushed/coalesced.
     debug_assert!(
       !region.intervals.is_empty(),
       "alloc_block_in_region: region has no intervals; implementation error"
@@ -205,47 +220,156 @@ impl Context {
     Some(new_block_id)
   }
 
-  /// Spawns an iterator starting at the region's begin block
+  /// Spawns a cursor starting at the region's begin block
   ///
   /// Args:
-  ///     id (`RegionId`): The region identifier to traverse
+  ///     id (`RegionId`): The region identifier to point to
   ///
   /// Returns:
-  ///     `Option<Iter<'_>>`: The iterator cursor if valid
-  pub fn iter(&self, id: RegionId) -> Option<Iter<'_>> {
+  ///     `Option<Cursor>`: The cursor if valid
+  pub fn cursor(&self, id: RegionId) -> Option<Cursor> {
     let idx = id.0 as usize;
     if idx < (self.region_arena.len()) {
       let r = &self.region_arena[idx];
-      if let Some(first_interval) = r.intervals.first() {
-        return Some(Iter {
-          context: self,
-          i: first_interval.begin,
-        });
+      if self.region_size(id).is_some() {
+        if let Some(first_interval) = r.intervals.first() {
+          return Some(Cursor {
+            i: first_interval.begin,
+          });
+        }
       }
     }
     None
   }
 
-  /// Spawns a mutable iterator starting at the region's begin block
-  ///
-  /// Args:
-  ///     id (`RegionId`): The region identifier to traverse
-  ///
-  /// Returns:
-  ///     `Option<IterMut<'_>>`: The mutable iterator cursor if valid
-  pub fn iter_mut(&mut self, id: RegionId) -> Option<IterMut<'_>> {
-    let idx = id.0 as usize;
-    if idx < (self.region_arena.len()) {
-      let r = &self.region_arena[idx];
-      if let Some(first_interval) = r.intervals.first() {
-        let begin = first_interval.begin;
-        return Some(IterMut {
-          context: self,
-          i: begin,
-        });
+  /// Navigates to the parent block scope in-place
+  pub fn up(&self, cursor: &mut Cursor) -> Option<()> {
+    if cursor.i.0 == 0 {
+      return None;
+    }
+    let idx = (cursor.i.0 as usize) - 1;
+    let parent = self.block_arena[idx].up;
+    if parent.0 == 0 {
+      None
+    } else {
+      cursor.i = parent;
+      Some(())
+    }
+  }
+
+  /// Navigates to the first child block scope in-place
+  pub fn down(&self, cursor: &mut Cursor) -> Option<()> {
+    if cursor.i.0 == 0 {
+      return None;
+    }
+    let idx = (cursor.i.0 as usize) - 1;
+    let child = self.block_arena[idx].down;
+    if child.0 == 0 {
+      None
+    } else {
+      cursor.i = child;
+      Some(())
+    }
+  }
+
+  /// Navigates to the next sibling block scope in-place
+  pub fn next(&self, cursor: &mut Cursor) -> Option<()> {
+    if cursor.i.0 == 0 {
+      return None;
+    }
+    let idx = (cursor.i.0 as usize) - 1;
+    let next = self.block_arena[idx].next;
+    if next.0 == 0 {
+      None
+    } else {
+      cursor.i = next;
+      Some(())
+    }
+  }
+
+  /// Resolves a symbol lexically by climbing parent scopes from the cursor
+  pub fn find(&self, cursor: Cursor, symbol: Symbol) -> Option<EntryId> {
+    let mut curr = cursor.i;
+    while curr.0 != 0 {
+      let curr_val = curr.0;
+      let block_idx = (curr_val as usize) - 1;
+      let region_id = self.block_arena[block_idx].region;
+      let region_idx = region_id.0 as usize;
+      let region = &self.region_arena[region_idx];
+      if let Some(&entry) = region.bindings.get(&(curr, symbol)) {
+        return Some(entry);
       }
+      curr = self.block_arena[block_idx].up;
     }
     None
+  }
+
+  /// Binds a symbol to the cursor's current block with the given entry identifier
+  pub fn bind(&mut self, cursor: Cursor, symbol: Symbol, entry: EntryId) {
+    if cursor.i.0 != 0 {
+      let block_idx = (cursor.i.0 as usize) - 1;
+      let region_id = self.block_arena[block_idx].region;
+      let region_idx = region_id.0 as usize;
+      self.region_arena[region_idx]
+        .bindings
+        .insert((cursor.i, symbol), entry);
+    }
+  }
+
+  /// Allocates a new child block in the current block's region and moves down to it
+  pub fn push_block(&mut self, cursor: &mut Cursor) -> Option<()> {
+    if cursor.i.0 != 0 {
+      let current = cursor.i;
+      let block_idx = (current.0 as usize) - 1;
+      let region_id = self.block_arena[block_idx].region;
+      let new_block = self.alloc_block_in_region(region_id)?;
+      
+      let down = self.block_arena[block_idx].down;
+      if down.0 == 0 {
+        self.block_arena[block_idx].down = new_block;
+      } else {
+        let mut sib = down;
+        loop {
+          let sib_idx = (sib.0 as usize) - 1;
+          let next = self.block_arena[sib_idx].next;
+          if next.0 == 0 {
+            self.block_arena[sib_idx].next = new_block;
+            break;
+          }
+          sib = next;
+        }
+      }
+      let new_idx = (new_block.0 as usize) - 1;
+      self.block_arena[new_idx].up = current;
+      cursor.i = new_block;
+      Some(())
+    } else {
+      None
+    }
+  }
+
+  /// Allocates a new child region nested under the parent cursor's current block
+  /// and moves the cursor into the root block of that region.
+  pub fn push_region(&mut self, cursor: &mut Cursor) -> Option<RegionId> {
+    if cursor.i.0 != 0 {
+      let parent = cursor.i;
+      let region_id = self.region_alloc_child(1, parent)?;
+      // Safety: region_alloc_child succeeded, which guarantees that the region's intervals vector
+      // is non-empty. Thus, first() is guaranteed to return Some, and unwrap() will not panic.
+      debug_assert!(
+        !self.region_arena[region_id.0 as usize].intervals.is_empty(),
+        "intervals must not be empty after successful child region allocation"
+      );
+      let root = self.region_arena[region_id.0 as usize]
+        .intervals
+        .first()
+        .unwrap()
+        .begin;
+      cursor.i = root;
+      Some(region_id)
+    } else {
+      None
+    }
   }
 
   /// Allocates a child region nested under a parent block scope
@@ -507,14 +631,11 @@ mod tests {
     context.region_free(RegionId(999));
   }
 
-  /// Verifies iterator creation checks on out-of-bounds region handles
+  /// Verifies cursor creation checks on out-of-bounds region handles
   #[test]
   fn test_iterators_invalid_region() {
     let context = Context::new();
-    assert!(context.iter(RegionId(999)).is_none());
-    
-    let mut context_mut = Context::new();
-    assert!(context_mut.iter_mut(RegionId(999)).is_none());
+    assert!(context.cursor(RegionId(999)).is_none());
   }
 
   /// Verifies safety checks on invalid block or region identifiers
@@ -547,24 +668,31 @@ mod tests {
   }
 
   /// Verifies disjoint range allocation when active interval is full
+  /// and confirms that coalescing merges contiguous allocations.
   #[test]
   fn test_alloc_block_in_region_disjoint_allocation() {
     let mut context = Context::new();
     let r = context.region_alloc(2).unwrap();
-    let mut iter_mut = context.iter_mut(r).unwrap();
+    let mut cursor = context.cursor(r).unwrap();
     
-    iter_mut.push().unwrap();
+    // Within capacity (size 2), creates Block 2
+    context.push_block(&mut cursor).unwrap();
+    assert_eq!(cursor.i.0, 2);
     
-    iter_mut.push().unwrap();
-    assert_eq!(iter_mut.i.0, 3);
+    // Out of capacity, allocates a new block (3). Since it's contiguous, it coalesces.
+    context.push_block(&mut cursor).unwrap();
+    assert_eq!(cursor.i.0, 3);
     assert_eq!(context.region_size(r), Some(3));
+    
+    // Verify that coalescing kept the number of intervals as 1
+    assert_eq!(context.region_arena[r.0 as usize].intervals.len(), 1);
   }
 
   /// Verifies size introspection behavior on empty regions
   #[test]
   fn test_zero_sized_region_size_introspection() {
     let mut context = Context::new();
-    let r = context.region_alloc(0).unwrap();
-    assert_eq!(context.region_size(r), None);
+    let r = context.region_alloc(0);
+    assert!(r.is_none());
   }
 }

@@ -24,7 +24,7 @@ Symbol Association:
 - "d" => Symbol(4)
 */
 
-use env::env::{Context, EntryId, RegionId, Symbol, Iter};
+use env::env::{Context, EntryId, RegionId, Symbol, Cursor};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -53,27 +53,27 @@ fn simulate_lexical_scoping() -> Option<Program> {
 
   let mut ctx = Context::new();
   let root_region = ctx.region_alloc(8)?;
-  let mut i = ctx.iter_mut(root_region)?;
+  let mut cursor = ctx.cursor(root_region)?;
 
-  i.bind(Symbol(1), EntryId(0));
-  i.bind(Symbol(2), EntryId(1));
+  ctx.bind(cursor, Symbol(1), EntryId(0));
+  ctx.bind(cursor, Symbol(2), EntryId(1));
 
-  i.push()?;
-  i.bind(Symbol(2), EntryId(2));
+  ctx.push_block(&mut cursor)?;
+  ctx.bind(cursor, Symbol(2), EntryId(2));
 
-  i.push()?;
-  i.bind(Symbol(3), EntryId(3));
+  ctx.push_block(&mut cursor)?;
+  ctx.bind(cursor, Symbol(3), EntryId(3));
 
-  i.up()?;
-  i.push()?;
-  i.bind(Symbol(2), EntryId(4));
-  i.bind(Symbol(3), EntryId(5));
+  ctx.up(&mut cursor)?;
+  ctx.push_block(&mut cursor)?;
+  ctx.bind(cursor, Symbol(2), EntryId(4));
+  ctx.bind(cursor, Symbol(3), EntryId(5));
 
-  i.up()?;
-  i.bind(Symbol(3), EntryId(6));
+  ctx.up(&mut cursor)?;
+  ctx.bind(cursor, Symbol(3), EntryId(6));
 
-  i.up()?;
-  i.bind(Symbol(4), EntryId(7));
+  ctx.up(&mut cursor)?;
+  ctx.bind(cursor, Symbol(4), EntryId(7));
 
   Some(Program {
     ctx,
@@ -82,45 +82,45 @@ fn simulate_lexical_scoping() -> Option<Program> {
   })
 }
 
-fn find<'a>(p: &'a Program, i: Iter, sym: Symbol) -> Option<&'a Entry> {
-  let eid = i.find(sym)?;
+fn find<'a>(p: &'a Program, cursor: Cursor, sym: Symbol) -> Option<&'a Entry> {
+  let eid = p.ctx.find(cursor, sym)?;
   Some(&p.mem[eid.0 as usize])
 }
 
 fn simulate_eval(p: &Program) -> Option<()> {
-  let mut i = p.ctx.iter(p.root_region)?;
+  let mut cursor = p.ctx.cursor(p.root_region)?;
 
   // Block 1
-  find(p, i, Symbol(1));
-  find(p, i, Symbol(2));
-  find(p, i, Symbol(3));
+  find(p, cursor, Symbol(1));
+  find(p, cursor, Symbol(2));
+  find(p, cursor, Symbol(3));
 
   // Enter Block 2
-  i.down()?;
-  find(p, i, Symbol(2));
-  find(p, i, Symbol(3));
+  p.ctx.down(&mut cursor)?;
+  find(p, cursor, Symbol(2));
+  find(p, cursor, Symbol(3));
 
   // Enter Block 3
-  i.down()?;
-  find(p, i, Symbol(3));
-  find(p, i, Symbol(2));
+  p.ctx.down(&mut cursor)?;
+  find(p, cursor, Symbol(3));
+  find(p, cursor, Symbol(2));
 
   // Exit Block 3
-  i.up()?;
+  p.ctx.up(&mut cursor)?;
 
   // Enter Block 4
-  i.down()?;
-  i.next()?;
-  find(p, i, Symbol(2));
-  find(p, i, Symbol(3));
+  p.ctx.down(&mut cursor)?;
+  p.ctx.next(&mut cursor)?;
+  find(p, cursor, Symbol(2));
+  find(p, cursor, Symbol(3));
 
   // Exit Block 4 (returns to Block 2)
-  i.up()?;
-  find(p, i, Symbol(3));
+  p.ctx.up(&mut cursor)?;
+  find(p, cursor, Symbol(3));
 
   // Exit Block 2 (returns to Block 1)
-  i.up()?;
-  find(p, i, Symbol(4));
+  p.ctx.up(&mut cursor)?;
+  find(p, cursor, Symbol(4));
 
   Some(())
 }

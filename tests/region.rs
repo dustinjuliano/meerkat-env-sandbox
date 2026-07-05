@@ -141,17 +141,15 @@ fn test_zero_sized_allocations() {
   let mut context = Context::new();
 
   // Allocate size `0`
-  let r1 = context.region_alloc(0).unwrap();
-  // Backing capacity should be exactly `0` (verifies off-by-one is fixed)
+  let r1 = context.region_alloc(0);
+  assert!(r1.is_none());
+  
+  // Backing capacity should be exactly `0`
   assert_eq!(
     context.blocks_capacity(),
     0,
     "Zero-sized allocation should not resize the blocks array"
   );
-
-  // Free the zero-sized region
-  context.region_free(r1);
-  assert_eq!(context.blocks_capacity(), 0);
 
   // Allocate size `10`
   let r2 = context.region_alloc(10).unwrap();
