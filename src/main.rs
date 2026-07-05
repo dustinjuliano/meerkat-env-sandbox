@@ -64,15 +64,15 @@ fn simulate_lexical_scoping() -> Option<Program> {
   i.push();
   i.bind(Symbol(3), EntryId(3));
 
-  i = i.up()?;
+  i.up()?;
   i.push();
   i.bind(Symbol(2), EntryId(4));
   i.bind(Symbol(3), EntryId(5));
 
-  i = i.up()?;
+  i.up()?;
   i.bind(Symbol(3), EntryId(6));
 
-  i = i.up()?;
+  i.up()?;
   i.bind(Symbol(4), EntryId(7));
 
   Some(Program {
@@ -82,51 +82,51 @@ fn simulate_lexical_scoping() -> Option<Program> {
   })
 }
 
-fn find<'a>(p: &'a Program, cursor: Iter, sym: Symbol) -> Option<&'a Entry> {
-  let eid = cursor.find(sym)?;
+fn find<'a>(p: &'a Program, i: Iter, sym: Symbol) -> Option<&'a Entry> {
+  let eid = i.find(sym)?;
   Some(&p.mem[eid.0 as usize])
 }
 
 fn simulate_eval(p: &Program) -> Option<()> {
-  let mut cursor = p.ctx.iter(p.root_region)?;
+  let mut i = p.ctx.iter(p.root_region)?;
 
   // Block 1
-  find(p, cursor, Symbol(1));
-  find(p, cursor, Symbol(2));
-  find(p, cursor, Symbol(3));
+  find(p, i, Symbol(1));
+  find(p, i, Symbol(2));
+  find(p, i, Symbol(3));
 
   // Enter Block 2
-  cursor = cursor.down()?;
-  find(p, cursor, Symbol(2));
-  find(p, cursor, Symbol(3));
+  i.down()?;
+  find(p, i, Symbol(2));
+  find(p, i, Symbol(3));
 
   // Enter Block 3
-  cursor = cursor.down()?;
-  find(p, cursor, Symbol(3));
-  find(p, cursor, Symbol(2));
+  i.down()?;
+  find(p, i, Symbol(3));
+  find(p, i, Symbol(2));
 
   // Exit Block 3
-  cursor = cursor.up()?;
+  i.up()?;
 
   // Enter Block 4
-  cursor = cursor.down()?;
-  cursor.next()?;
-  find(p, cursor, Symbol(2));
-  find(p, cursor, Symbol(3));
+  i.down()?;
+  i.next()?;
+  find(p, i, Symbol(2));
+  find(p, i, Symbol(3));
 
   // Exit Block 4 (returns to Block 2)
-  cursor = cursor.up()?;
-  find(p, cursor, Symbol(3));
+  i.up()?;
+  find(p, i, Symbol(3));
 
   // Exit Block 2 (returns to Block 1)
-  cursor = cursor.up()?;
-  find(p, cursor, Symbol(4));
+  i.up()?;
+  find(p, i, Symbol(4));
 
   Some(())
 }
 
 fn main() -> Result<(), &'static str> {
-  let pg = simulate_lexical_scoping().ok_or("build error")?;
-  simulate_eval(&pg).ok_or("find error")?;
+  let p = simulate_lexical_scoping().ok_or("build error")?;
+  simulate_eval(&p).ok_or("find error")?;
   Ok(())
 }
