@@ -29,12 +29,17 @@ impl BlockAllocator {
     &mut self,
     size: u32,
     block_arena: &mut Vec<super::block::Block>,
-  ) -> Interval {
+  ) -> Option<Interval> {
     let mut found_interval = None;
     for i in 0..self.block_freelist.len() {
       let r = self.block_freelist[i];
+      debug_assert!(r.end.0 >= r.begin.0, "freelist interval invariant violated");
       let r_size = (r.end.0) - (r.begin.0);
       if r_size >= size {
+        debug_assert!(
+          r.begin.0 <= r.end.0.saturating_sub(size),
+          "freelist split invariant violated"
+        );
         self.block_freelist.swap_remove(i);
         if r_size > size {
           self.block_freelist.push(Interval {
@@ -54,6 +59,9 @@ impl BlockAllocator {
       Some(range) => range,
       None => {
         let begin = self.block_next_id;
+        if (begin.0 as u64) + (size as u64) > super::MAX_BLOCK_ID as u64 {
+          return None;
+        }
         let end = BlockId((begin.0) + size);
         self.block_next_id = end;
 
@@ -66,7 +74,7 @@ impl BlockAllocator {
       }
     };
 
-    Interval { begin, end }
+    Some(Interval { begin, end })
   }
 }
 
@@ -87,7 +95,7 @@ mod tests {
   fn test_alloc_range_no_freelist() {
     let mut alloc = BlockAllocator::new();
     let mut arena = Vec::new();
-    let r1 = alloc.alloc_block_range(5, &mut arena);
+    let r1 = alloc.alloc_block_range(5, &mut arena).unwrap();
     assert_eq!(r1.begin.0, 1);
     assert_eq!(r1.end.0, 6);
     assert_eq!(arena.len(), 5);
@@ -98,10 +106,10 @@ mod tests {
   fn test_alloc_range_freelist_exact() {
     let mut alloc = BlockAllocator::new();
     let mut arena = Vec::new();
-    let r1 = alloc.alloc_block_range(5, &mut arena);
+    let r1 = alloc.alloc_block_range(5, &mut arena).unwrap();
     alloc.block_freelist.push(r1);
     
-    let r2 = alloc.alloc_block_range(5, &mut arena);
+    let r2 = alloc.alloc_block_range(5, &mut arena).unwrap();
     assert_eq!(r2.begin.0, 1);
     assert_eq!(r2.end.0, 6);
     assert_eq!(alloc.block_freelist.len(), 0);
@@ -112,10 +120,10 @@ mod tests {
   fn test_alloc_range_freelist_partial() {
     let mut alloc = BlockAllocator::new();
     let mut arena = Vec::new();
-    let r1 = alloc.alloc_block_range(5, &mut arena);
+    let r1 = alloc.alloc_block_range(5, &mut arena).unwrap();
     alloc.block_freelist.push(r1);
     
-    let r2 = alloc.alloc_block_range(3, &mut arena);
+    let r2 = alloc.alloc_block_range(3, &mut arena).unwrap();
     assert_eq!(r2.begin.0, 1);
     assert_eq!(r2.end.0, 4);
     assert_eq!(alloc.block_freelist.len(), 1);

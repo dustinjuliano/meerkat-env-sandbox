@@ -151,12 +151,15 @@ impl<'a> IterMut<'a> {
   }
 
   /// Allocates a new child block in the region and moves down to it
-  pub fn push(&mut self) {
+  ///
+  /// Returns:
+  ///     `Option<()>`: `Some(())` on success, `None` if block keyspace is exhausted
+  pub fn push(&mut self) -> Option<()> {
     if self.i.0 != 0 {
       let current = self.i;
       let block_idx = (current.0 as usize) - 1;
       let region_id = self.context.block_arena[block_idx].region;
-      let new_block = self.context.alloc_block_in_region(region_id);
+      let new_block = self.context.alloc_block_in_region(region_id)?;
       let down = self.context.block_arena[block_idx].down;
       if down.0 == 0 {
         self.context.block_arena[block_idx].down = new_block;
@@ -176,6 +179,7 @@ impl<'a> IterMut<'a> {
       self.context.block_arena[new_idx].up = current;
       self.i = new_block;
     }
+    Some(())
   }
 
   /// Resolves a symbol lexically by climbing parent scopes
@@ -227,7 +231,7 @@ mod tests {
   #[test]
   fn test_iter_immutable_navigation() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     let mut root = context.iter(r).unwrap();
     assert_eq!(root.i.0, 1);
@@ -239,12 +243,12 @@ mod tests {
   #[test]
   fn test_iter_lexical_find() {
     let mut context = Context::new();
-    let r_a = context.region_alloc(2);
+    let r_a = context.region_alloc(2).unwrap();
     let mut iter_mut_a = context.iter_mut(r_a).unwrap();
-    iter_mut_a.push(); // creates 2
+    iter_mut_a.push().unwrap(); // creates 2
     iter_mut_a.bind(Symbol(42), EntryId(100));
 
-    let r_b = context.region_alloc_child(2, BlockId(2));
+    let r_b = context.region_alloc_child(2, BlockId(2)).unwrap();
     let iter_b = context.iter(r_b).unwrap();
     assert_eq!(iter_b.find(Symbol(42)), Some(EntryId(100)));
     assert_eq!(iter_b.find(Symbol(99)), None);
@@ -254,12 +258,12 @@ mod tests {
   #[test]
   fn test_iter_iterator_impl() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     let mut iter_mut = context.iter_mut(r).unwrap();
-    iter_mut.push(); // creates 2
+    iter_mut.push().unwrap(); // creates 2
     iter_mut.up().unwrap();
-    iter_mut.push(); // creates 3
+    iter_mut.push().unwrap(); // creates 3
 
     let root = context.iter(r).unwrap();
     let mut sibs = root;
@@ -275,10 +279,10 @@ mod tests {
   #[test]
   fn test_iter_mut_navigation_and_push() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     let mut iter_mut = context.iter_mut(r).unwrap();
-    iter_mut.push(); // creates 2
+    iter_mut.push().unwrap(); // creates 2
     assert_eq!(iter_mut.i.0, 2);
 
     iter_mut.up().unwrap();
@@ -292,12 +296,12 @@ mod tests {
   #[test]
   fn test_iter_mut_sibling_step() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     let mut iter_mut = context.iter_mut(r).unwrap();
-    iter_mut.push(); // creates 2
+    iter_mut.push().unwrap(); // creates 2
     iter_mut.up().unwrap();
-    iter_mut.push(); // creates 3
+    iter_mut.push().unwrap(); // creates 3
 
     let mut sibs = context.iter_mut(r).unwrap();
     sibs.down().unwrap();
@@ -311,7 +315,7 @@ mod tests {
   #[test]
   fn test_iter_mut_binding() {
     let mut context = Context::new();
-    let r = context.region_alloc(1);
+    let r = context.region_alloc(1).unwrap();
     
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.bind(Symbol(5), EntryId(50));

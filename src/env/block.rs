@@ -53,7 +53,7 @@ mod tests {
   #[test]
   fn test_context_link_up() {
     let mut context = Context::new();
-    let r = context.region_alloc(2);
+    let r = context.region_alloc(2).unwrap();
     
     // Parent link block 1 to block 2
     context.link_up(BlockId(1), BlockId(2));
@@ -66,7 +66,7 @@ mod tests {
   #[test]
   fn test_context_link_down() {
     let mut context = Context::new();
-    let r = context.region_alloc(2);
+    let r = context.region_alloc(2).unwrap();
     
     // Link parent 1 to child 2
     context.link_down(BlockId(1), BlockId(2));
@@ -79,7 +79,7 @@ mod tests {
   #[test]
   fn test_context_link_next() {
     let mut context = Context::new();
-    let r = context.region_alloc(3);
+    let r = context.region_alloc(3).unwrap();
     
     // Link sibling 1 to 2
     context.link_next(BlockId(1), BlockId(2));

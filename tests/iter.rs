@@ -8,16 +8,16 @@ fn test_sibling_iteration() {
   let mut context = Context::new();
   
   // Allocate region
-  let r = context.region_alloc(3);
+  let r = context.region_alloc(3).unwrap();
   
   // Create sibling structure under block `1`
   // `1` -> child `2`, sibling `3`
   let mut iter_mut = context.iter_mut(r).unwrap(); // at `1`
-  iter_mut.push(); // creates `2`, moves to `2`
+  iter_mut.push().unwrap(); // creates `2`, moves to `2`
   iter_mut.bind(Symbol(2), EntryId(20));
   
   iter_mut.up().unwrap(); // at `1`
-  iter_mut.push(); // creates `3`, moves to `3`
+  iter_mut.push().unwrap(); // creates `3`, moves to `3`
   iter_mut.bind(Symbol(3), EntryId(30));
   
   // Traverse sibling chain under `1` starting at `2`
@@ -39,9 +39,9 @@ fn test_sibling_iteration() {
 fn test_parent_child_traversal() {
   let mut context = Context::new();
   
-  let r = context.region_alloc(2);
+  let r = context.region_alloc(2).unwrap();
   let mut iter_mut = context.iter_mut(r).unwrap(); // at `1`
-  iter_mut.push(); // creates `2`, moves to `2`
+  iter_mut.push().unwrap(); // creates `2`, moves to `2`
   iter_mut.bind(Symbol(2), EntryId(20));
   
   let mut iter = context.iter(r).unwrap();
@@ -60,7 +60,7 @@ fn test_parent_child_traversal() {
 fn test_boundary_crossing() {
   let mut context = Context::new();
   
-  let r_a = context.region_alloc(2);
+  let r_a = context.region_alloc(2).unwrap();
   let mut iter_mut_a = context.iter_mut(r_a).unwrap();
   iter_mut_a.push(); // creates block `2`, moves to `2`
   
@@ -74,7 +74,7 @@ fn test_boundary_crossing() {
 fn test_lexical_resolution_and_binding() {
   let mut context = Context::new();
   
-  let r_a = context.region_alloc(2);
+  let r_a = context.region_alloc(2).unwrap();
   let mut iter_mut_a = context.iter_mut(r_a).unwrap(); // block `1`
   iter_mut_a.bind(Symbol(42), EntryId(100));
   iter_mut_a.push(); // block `2`
@@ -89,7 +89,7 @@ fn test_lexical_resolution_and_binding() {
 fn test_region_recycling_and_size() {
   let mut context = Context::new();
   
-  let r1 = context.region_alloc(5);
+  let r1 = context.region_alloc(5).unwrap();
   assert_eq!(context.region_size(r1), Some(5));
   
   let mut iter_mut = context.iter_mut(r1).unwrap();
@@ -100,7 +100,7 @@ fn test_region_recycling_and_size() {
   assert_eq!(context.region_size(r1), None);
   
   // Allocate new region of same size (should reuse `r1`'s index)
-  let r2 = context.region_alloc(5);
+  let r2 = context.region_alloc(5).unwrap();
   assert_eq!(r2, r1, "Should recycle RegionId");
   assert_eq!(context.region_size(r2), Some(5));
   

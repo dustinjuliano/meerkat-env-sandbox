@@ -52,20 +52,20 @@ fn simulate_lexical_scoping() -> Option<Program> {
   ];
 
   let mut ctx = Context::new();
-  let root_region = ctx.region_alloc(8);
+  let root_region = ctx.region_alloc(8)?;
   let mut i = ctx.iter_mut(root_region)?;
 
   i.bind(Symbol(1), EntryId(0));
   i.bind(Symbol(2), EntryId(1));
 
-  i.push();
+  i.push()?;
   i.bind(Symbol(2), EntryId(2));
 
-  i.push();
+  i.push()?;
   i.bind(Symbol(3), EntryId(3));
 
   i.up()?;
-  i.push();
+  i.push()?;
   i.bind(Symbol(2), EntryId(4));
   i.bind(Symbol(3), EntryId(5));
 

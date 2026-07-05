@@ -11,14 +11,14 @@ fn test_region_reclamation_capacity() {
   let mut context = Context::new();
 
   // Allocate region and record initial capacity
-  let region = context.region_alloc(10);
+  let region = context.region_alloc(10).unwrap();
   let cap1 = context.blocks_capacity();
 
   // Free region
   context.region_free(region);
 
   // Re-allocate a region of the same size
-  let _new_region = context.region_alloc(10);
+  let _new_region = context.region_alloc(10).unwrap();
   let cap2 = context.blocks_capacity();
 
   // Assert capacity did not grow
@@ -39,9 +39,9 @@ fn test_arbitrary_sizes_and_allocation_splitting() {
   let mut context = Context::new();
 
   // Allocate three contiguous regions
-  let r1 = context.region_alloc(10);
-  let r2 = context.region_alloc(20);
-  let r3 = context.region_alloc(30);
+  let r1 = context.region_alloc(10).unwrap();
+  let r2 = context.region_alloc(20).unwrap();
+  let r3 = context.region_alloc(30).unwrap();
 
   // High water mark capacity should be `10 + 20 + 30 = 60`
   let initial_cap = context.blocks_capacity();
@@ -57,7 +57,7 @@ fn test_arbitrary_sizes_and_allocation_splitting() {
 
   // Allocate a smaller region of size `15`
   // This should split the freed region of size `20`, leaving a free slot of size `5`
-  let r4 = context.region_alloc(15);
+  let r4 = context.region_alloc(15).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     60,
@@ -66,7 +66,7 @@ fn test_arbitrary_sizes_and_allocation_splitting() {
 
   // Allocate a region of size `5`
   // This should consume the remaining split slot of size `5`
-  let r5 = context.region_alloc(5);
+  let r5 = context.region_alloc(5).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     60,
@@ -75,7 +75,7 @@ fn test_arbitrary_sizes_and_allocation_splitting() {
 
   // Allocate another region of size `5`
   // Since the freelist is now empty, capacity must grow to `65`
-  let r6 = context.region_alloc(5);
+  let r6 = context.region_alloc(5).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     65,
@@ -99,11 +99,11 @@ fn test_mixed_allocation_and_free_ordering() {
   let mut context = Context::new();
 
   // Allocate `5` regions of varying sizes
-  let r1 = context.region_alloc(5);
-  let r2 = context.region_alloc(10);
-  let r3 = context.region_alloc(15);
-  let r4 = context.region_alloc(20);
-  let r5 = context.region_alloc(25);
+  let r1 = context.region_alloc(5).unwrap();
+  let r2 = context.region_alloc(10).unwrap();
+  let r3 = context.region_alloc(15).unwrap();
+  let r4 = context.region_alloc(20).unwrap();
+  let r5 = context.region_alloc(25).unwrap();
 
   let base_cap = context.blocks_capacity(); // `5 + 10 + 15 + 20 + 25 = 75`
   assert_eq!(base_cap, 75);
@@ -113,11 +113,11 @@ fn test_mixed_allocation_and_free_ordering() {
   context.region_free(r2); // size `10`
 
   // Try allocating a size that fits in the freed size `20` but not size `10`
-  let r6 = context.region_alloc(18); // Should consume from the size `20` slot
+  let r6 = context.region_alloc(18).unwrap(); // Should consume from the size `20` slot
   assert_eq!(context.blocks_capacity(), 75);
 
   // Try allocating a size that fits in the remaining size `2` or size `10`
-  let r7 = context.region_alloc(10); // Should consume the size `10` slot
+  let r7 = context.region_alloc(10).unwrap(); // Should consume the size `10` slot
   assert_eq!(context.blocks_capacity(), 75);
 
   // Free all remaining regions
@@ -128,7 +128,7 @@ fn test_mixed_allocation_and_free_ordering() {
   context.region_free(r7);
 
   // Re-allocating should still be monotone up to the previous high water mark
-  let _r_big = context.region_alloc(25);
+  let _r_big = context.region_alloc(25).unwrap();
   assert_eq!(context.blocks_capacity(), 75);
 }
 
@@ -141,7 +141,7 @@ fn test_zero_sized_allocations() {
   let mut context = Context::new();
 
   // Allocate size `0`
-  let r1 = context.region_alloc(0);
+  let r1 = context.region_alloc(0).unwrap();
   // Backing capacity should be exactly `0` (verifies off-by-one is fixed)
   assert_eq!(
     context.blocks_capacity(),
@@ -154,7 +154,7 @@ fn test_zero_sized_allocations() {
   assert_eq!(context.blocks_capacity(), 0);
 
   // Allocate size `10`
-  let r2 = context.region_alloc(10);
+  let r2 = context.region_alloc(10).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     10,
@@ -174,11 +174,11 @@ fn test_first_fit_strategy() {
 
   // Allocate `3` regions separated by small active regions to prevent
   // automatic contiguous tracking
-  let r1 = context.region_alloc(10);
-  let sep1 = context.region_alloc(1);
-  let r2 = context.region_alloc(30);
-  let sep2 = context.region_alloc(1);
-  let r3 = context.region_alloc(20);
+  let r1 = context.region_alloc(10).unwrap();
+  let sep1 = context.region_alloc(1).unwrap();
+  let r2 = context.region_alloc(30).unwrap();
+  let sep2 = context.region_alloc(1).unwrap();
+  let r3 = context.region_alloc(20).unwrap();
 
   // Base capacity is `10 + 1 + 30 + 1 + 20 = 62` blocks
   assert_eq!(context.blocks_capacity(), 62);
@@ -193,12 +193,12 @@ fn test_first_fit_strategy() {
   // `10` is too small. `30` (the next one) is large enough
   // First-Fit splits the size `30` slot (leaving size `15` free)
   // The size `20` slot remains untouched (size `20`)
-  let r4 = context.region_alloc(15);
+  let r4 = context.region_alloc(15).unwrap();
   assert_eq!(context.blocks_capacity(), 62);
 
   // Request size `20`
   // Since the size `20` slot is untouched, it fits perfectly
-  let r5 = context.region_alloc(20);
+  let r5 = context.region_alloc(20).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     62,
@@ -221,7 +221,7 @@ fn test_exact_vs_overflow_fit() {
   let mut context = Context::new();
 
   // Allocate size `10`
-  let r1 = context.region_alloc(10);
+  let r1 = context.region_alloc(10).unwrap();
   assert_eq!(context.blocks_capacity(), 10);
 
   // Free it
@@ -229,12 +229,12 @@ fn test_exact_vs_overflow_fit() {
 
   // Request size `11`. It exceeds the size `10` slot
   // It should not fit and capacity must grow to `21`
-  let r2 = context.region_alloc(11);
+  let r2 = context.region_alloc(11).unwrap();
   assert_eq!(context.blocks_capacity(), 21);
 
   // Request size `10`
   // It should fit perfectly in the original size `10` free slot
-  let r3 = context.region_alloc(10);
+  let r3 = context.region_alloc(10).unwrap();
   assert_eq!(
     context.blocks_capacity(),
     21,
@@ -254,9 +254,9 @@ fn test_insufficient_freelist_slots_do_not_combine() {
   let mut context = Context::new();
 
   // Allocate three regions, separated so they do not combine automatically
-  let r1 = context.region_alloc(5);
-  let sep = context.region_alloc(1);
-  let r2 = context.region_alloc(5);
+  let r1 = context.region_alloc(5).unwrap();
+  let sep = context.region_alloc(1).unwrap();
+  let r2 = context.region_alloc(5).unwrap();
 
   assert_eq!(context.blocks_capacity(), 11); // `5 + 1 + 5 = 11`
 
@@ -268,7 +268,7 @@ fn test_insufficient_freelist_slots_do_not_combine() {
   // Neither of the size `5` slots is large enough, and we do not
   // coalesce active regions on free yet
   // So the allocator must grow capacity by `10` blocks (to `21`)
-  let r3 = context.region_alloc(10);
+  let r3 = context.region_alloc(10).unwrap();
   assert_eq!(context.blocks_capacity(), 21);
 
   context.region_free(sep);
@@ -284,7 +284,7 @@ fn test_large_freelist_split() {
   let mut context = Context::new();
 
   // Allocate a large region of size `100`
-  let r1 = context.region_alloc(100);
+  let r1 = context.region_alloc(100).unwrap();
   assert_eq!(context.blocks_capacity(), 100);
 
   // Free it
@@ -292,11 +292,11 @@ fn test_large_freelist_split() {
 
   // Request size `1`
   // This should split the size `100` slot, leaving `99` blocks in freelist
-  let r2 = context.region_alloc(1);
+  let r2 = context.region_alloc(1).unwrap();
   assert_eq!(context.blocks_capacity(), 100);
 
   // Request size `99`. This should consume the remainder of the split slot
-  let r3 = context.region_alloc(99);
+  let r3 = context.region_alloc(99).unwrap();
   assert_eq!(context.blocks_capacity(), 100);
 
   context.region_free(r2);
@@ -312,7 +312,7 @@ fn test_alternating_growth_and_reuse() {
   let mut context = Context::new();
 
   // Allocate size `50`
-  let r1 = context.region_alloc(50);
+  let r1 = context.region_alloc(50).unwrap();
   assert_eq!(context.blocks_capacity(), 50);
 
   // Free it
@@ -321,11 +321,11 @@ fn test_alternating_growth_and_reuse() {
   // Request size `100`
   // The freelist slot of `50` is too small. It must allocate `100` new blocks
   // Capacity grows to `150` blocks (`50` original + `100` new)
-  let r2 = context.region_alloc(100);
+  let r2 = context.region_alloc(100).unwrap();
   assert_eq!(context.blocks_capacity(), 150);
 
   // Request size `50`. It should fit perfectly in the original size `50` slot
-  let r3 = context.region_alloc(50);
+  let r3 = context.region_alloc(50).unwrap();
   assert_eq!(context.blocks_capacity(), 150);
 
   context.region_free(r2);
@@ -341,8 +341,8 @@ fn test_sentinel_exclusion() {
   let mut context = Context::new();
 
   // Allocate multiple regions
-  let r1 = context.region_alloc(10);
-  let r2 = context.region_alloc(20);
+  let r1 = context.region_alloc(10).unwrap();
+  let r2 = context.region_alloc(20).unwrap();
 
   // Verify that capacity is exactly the sum of requested blocks,
   // confirming block `0` is not used
@@ -364,7 +364,7 @@ fn test_high_volume_stress_cycle() {
 
   // Allocate `10` regions of size `10`
   for _ in 0..10 {
-    active.push(context.region_alloc(10));
+    active.push(context.region_alloc(10).unwrap());
   }
   let peak_cap = context.blocks_capacity();
   assert_eq!(peak_cap, 100);
@@ -379,7 +379,7 @@ fn test_high_volume_stress_cycle() {
   // Backing capacity should remain exactly `100`
   let mut ones = Vec::new();
   for _ in 0..100 {
-    ones.push(context.region_alloc(1));
+    ones.push(context.region_alloc(1).unwrap());
   }
   assert_eq!(context.blocks_capacity(), 100);
 
@@ -397,9 +397,9 @@ fn test_exhaust_freelist_completely() {
   let mut context = Context::new();
 
   // Allocate three blocks of size `10`
-  let r1 = context.region_alloc(10);
-  let r2 = context.region_alloc(10);
-  let r3 = context.region_alloc(10);
+  let r1 = context.region_alloc(10).unwrap();
+  let r2 = context.region_alloc(10).unwrap();
+  let r3 = context.region_alloc(10).unwrap();
   assert_eq!(context.blocks_capacity(), 30);
 
   // Free all
@@ -408,13 +408,13 @@ fn test_exhaust_freelist_completely() {
   context.region_free(r3);
 
   // Consume all `3` slots
-  let a1 = context.region_alloc(10);
-  let a2 = context.region_alloc(10);
-  let a3 = context.region_alloc(10);
+  let a1 = context.region_alloc(10).unwrap();
+  let a2 = context.region_alloc(10).unwrap();
+  let a3 = context.region_alloc(10).unwrap();
   assert_eq!(context.blocks_capacity(), 30);
 
   // Requesting a `4th` block must grow capacity
-  let a4 = context.region_alloc(10);
+  let a4 = context.region_alloc(10).unwrap();
   assert_eq!(context.blocks_capacity(), 40);
 
   context.region_free(a1);
