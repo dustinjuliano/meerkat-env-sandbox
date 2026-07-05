@@ -1,4 +1,11 @@
 //! Environment context managing block allocations and tracking
+//!
+//! # Sentinel conventions
+//!
+//! - [`BlockId(0)`](BlockId) is the null/sentinel value. Every arena access first
+//!   checks `id.0 != 0` before computing an index.
+//! - [`RegionId(0)`](RegionId) is **not** a sentinel; slot 0 is a valid live region.
+//!   Do not treat `RegionId(0)` as "no region".
 
 mod alloc;
 mod block;
@@ -89,6 +96,7 @@ impl Context {
       let idx = region_id.0 as usize;
       self.region_arena[idx].active_interval_used = 1;
       let root_block = interval.begin;
+      debug_assert!(root_block.0 != 0, "allocator must never produce BlockId(0)");
       self.block_arena[(root_block.0 as usize) - 1].region = region_id;
     }
 
@@ -153,6 +161,10 @@ impl Context {
 
     let region = &self.region_arena[idx];
     let offset = (region.active_interval_used) - 1;
+    debug_assert!(
+      !region.intervals.is_empty(),
+      "alloc_block_in_region: region has no intervals; implementation error"
+    );
     let begin_val = region.intervals.last().unwrap().begin.0;
     let new_block_id = BlockId(begin_val + offset);
 
@@ -223,7 +235,12 @@ impl Context {
     size: u32,
     parent: BlockId,
   ) -> RegionId {
+    assert!(size > 0, "region_alloc_child: size must be > 0");
     let region_id = self.region_alloc(size);
+    debug_assert!(
+      !self.region_arena[region_id.0 as usize].intervals.is_empty(),
+      "region_alloc_child: region has no intervals after alloc; implementation error"
+    );
     let root = self.region_arena[region_id.0 as usize]
       .intervals
       .first()
@@ -489,6 +506,14 @@ mod tests {
     
     let r2 = context.region_alloc_child(2, BlockId(999));
     assert_eq!(context.get_region_id_from_block(BlockId(3)), Some(r2));
+  }
+
+  /// Verifies that `region_alloc_child` panics on zero size (caller contract)
+  #[test]
+  #[should_panic(expected = "size must be > 0")]
+  fn test_region_alloc_child_zero_size_panics() {
+    let mut context = Context::new();
+    context.region_alloc_child(0, BlockId(0));
   }
 
   /// Verifies disjoint range allocation when active interval is full
