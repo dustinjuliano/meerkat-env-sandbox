@@ -1,15 +1,14 @@
 //! Environment context managing block allocations and tracking
 
-use std::collections::HashMap;
-
-pub(super) mod region;
-pub(super) mod block;
-pub(super) mod alloc;
-pub use self::block::BlockId;
+mod alloc;
+mod block;
+pub mod iter;
+mod region;
+use self::block::BlockId;
 use self::block::Interval;
-
-pub(super) mod iter;
+use std::collections::HashMap;
 pub use self::iter::{Iter, IterMut};
+use alloc::BlockAllocator;
 
 /// The maximum block identifier allowed due to half-open ranges
 pub const MAX_BLOCK_ID: u32 = u32::MAX - 1;
@@ -31,7 +30,7 @@ pub struct Context {
   block_arena: Vec<block::Block>,
   region_arena: Vec<region::Region>,
   region_freelist: Vec<u32>,
-  allocator: alloc::BlockAllocator,
+  allocator: BlockAllocator,
 }
 
 impl Default for Context {
@@ -44,7 +43,7 @@ impl Default for Context {
       block_arena: Vec::new(),
       region_arena: Vec::new(),
       region_freelist: Vec::new(),
-      allocator: alloc::BlockAllocator::new(),
+      allocator: BlockAllocator::new(),
     }
   }
 }
@@ -127,7 +126,7 @@ impl Context {
   ///
   /// Returns:
   ///     `BlockId`: The allocated block identifier
-  pub(super) fn alloc_block_in_region(
+  fn alloc_block_in_region(
     &mut self,
     region_id: RegionId,
   ) -> BlockId {
@@ -219,7 +218,7 @@ impl Context {
   ///
   /// Returns:
   ///     `RegionId`: The allocated child region identifier
-  pub fn region_alloc_child(
+  fn region_alloc_child(
     &mut self,
     size: u32,
     parent: BlockId,
@@ -292,7 +291,7 @@ impl Context {
   ///
   /// Returns:
   ///     `Option<RegionId>`: The owning region identifier if valid
-  pub fn block_region(&self, block: BlockId) -> Option<RegionId> {
+  fn get_region_id_from_block(&self, block: BlockId) -> Option<RegionId> {
     if (block.0 != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -317,7 +316,7 @@ impl Context {
   ///
   /// Returns:
   ///     `Option<(BlockId, BlockId)>`: The boundaries of the interval
-  pub fn block_freelist_interval(
+  fn block_freelist_interval(
     &self,
     idx: usize,
   ) -> Option<(BlockId, BlockId)> {
@@ -332,7 +331,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The block identifier to link
   ///     parent (`BlockId`): The parent block identifier
-  pub(super) fn link_up(&mut self, block: BlockId, parent: BlockId) {
+  fn link_up(&mut self, block: BlockId, parent: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -345,7 +344,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The parent block identifier
   ///     child (`BlockId`): The child block identifier
-  pub(super) fn link_down(&mut self, block: BlockId, child: BlockId) {
+  fn link_down(&mut self, block: BlockId, child: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -358,7 +357,7 @@ impl Context {
   /// Args:
   ///     block (`BlockId`): The block identifier to link
   ///     next (`BlockId`): The sibling block identifier
-  pub(super) fn link_next(&mut self, block: BlockId, next: BlockId) {
+  fn link_next(&mut self, block: BlockId, next: BlockId) {
     if ((block.0) != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
@@ -476,8 +475,8 @@ mod tests {
   fn test_introspection_invalid_inputs() {
     let context = Context::new();
     assert_eq!(context.region_size(RegionId(999)), None);
-    assert_eq!(context.block_region(BlockId(999)), None);
-    assert_eq!(context.block_region(BlockId(0)), None);
+    assert_eq!(context.get_region_id_from_block(BlockId(999)), None);
+    assert_eq!(context.get_region_id_from_block(BlockId(0)), None);
     assert_eq!(context.block_freelist_interval(999), None);
   }
 
@@ -489,7 +488,7 @@ mod tests {
     assert_eq!(context.block_arena[0].up.0, 0);
     
     let r2 = context.region_alloc_child(2, BlockId(999));
-    assert_eq!(context.block_region(BlockId(3)), Some(r2));
+    assert_eq!(context.get_region_id_from_block(BlockId(3)), Some(r2));
   }
 
   /// Verifies disjoint range allocation when active interval is full
@@ -502,7 +501,7 @@ mod tests {
     iter_mut.push();
     
     iter_mut.push();
-    assert_eq!(iter_mut.block_id().0, 3);
+    assert_eq!(iter_mut.i.0, 3);
     assert_eq!(context.region_size(r), Some(3));
   }
 

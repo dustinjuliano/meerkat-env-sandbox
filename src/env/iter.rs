@@ -10,11 +10,11 @@ pub struct Iter<'a> {
 }
 
 impl<'a> Iter<'a> {
-  /// Navigates to the parent block scope
+  /// Navigates to the parent block scope in-place
   ///
   /// Returns:
-  ///     `Option<Iter<'a>>`: The parent block iterator if not at root
-  pub fn up(self) -> Option<Self> {
+  ///     `Option<()>`: `Some(())` if successfully moved up, `None` if at root or invalid
+  pub fn up(&mut self) -> Option<()> {
     if self.i.0 == 0 {
       return None;
     }
@@ -23,18 +23,16 @@ impl<'a> Iter<'a> {
     if parent.0 == 0 {
       None
     } else {
-      Some(Iter {
-        context: self.context,
-        i: parent,
-      })
+      self.i = parent;
+      Some(())
     }
   }
 
-  /// Navigates to the first child block scope
+  /// Navigates to the first child block scope in-place
   ///
   /// Returns:
-  ///     `Option<Iter<'a>>`: The child block iterator if one exists
-  pub fn down(self) -> Option<Self> {
+  ///     `Option<()>`: `Some(())` if successfully moved down, `None` if no child exists
+  pub fn down(&mut self) -> Option<()> {
     if self.i.0 == 0 {
       return None;
     }
@@ -43,10 +41,8 @@ impl<'a> Iter<'a> {
     if child.0 == 0 {
       None
     } else {
-      Some(Iter {
-        context: self.context,
-        i: child,
-      })
+      self.i = child;
+      Some(())
     }
   }
 
@@ -71,14 +67,6 @@ impl<'a> Iter<'a> {
       curr = self.context.block_arena[block_idx].up;
     }
     None
-  }
-
-  /// Returns the current block identifier
-  ///
-  /// Returns:
-  ///     `BlockId`: The active block identifier
-  pub fn block_id(&self) -> BlockId {
-    self.i
   }
 
   /// Returns the region identifier of the current block
@@ -120,11 +108,11 @@ pub struct IterMut<'a> {
 }
 
 impl<'a> IterMut<'a> {
-  /// Navigates to the parent block scope
+  /// Navigates to the parent block scope in-place
   ///
   /// Returns:
-  ///     `Option<IterMut<'a>>`: The parent block iterator if not at root
-  pub fn up(self) -> Option<Self> {
+  ///     `Option<()>`: `Some(())` if successfully moved up, `None` if at root or invalid
+  pub fn up(&mut self) -> Option<()> {
     if self.i.0 == 0 {
       return None;
     }
@@ -133,18 +121,16 @@ impl<'a> IterMut<'a> {
     if parent.0 == 0 {
       None
     } else {
-      Some(IterMut {
-        context: self.context,
-        i: parent,
-      })
+      self.i = parent;
+      Some(())
     }
   }
 
-  /// Navigates to the first child block scope
+  /// Navigates to the first child block scope in-place
   ///
   /// Returns:
-  ///     `Option<IterMut<'a>>`: The child block iterator if one exists
-  pub fn down(self) -> Option<Self> {
+  ///     `Option<()>`: `Some(())` if successfully moved down, `None` if no child exists
+  pub fn down(&mut self) -> Option<()> {
     if self.i.0 == 0 {
       return None;
     }
@@ -153,10 +139,8 @@ impl<'a> IterMut<'a> {
     if child.0 == 0 {
       None
     } else {
-      Some(IterMut {
-        context: self.context,
-        i: child,
-      })
+      self.i = child;
+      Some(())
     }
   }
 
@@ -256,14 +240,6 @@ impl<'a> IterMut<'a> {
     }
   }
 
-  /// Returns the current block identifier
-  ///
-  /// Returns:
-  ///     `BlockId`: The active block identifier
-  pub fn block_id(&self) -> BlockId {
-    self.i
-  }
-
   /// Returns the region identifier of the current block
   ///
   /// Returns:
@@ -276,23 +252,16 @@ impl<'a> IterMut<'a> {
       self.context.block_arena[idx].region
     }
   }
-}
 
-impl<'a> Iterator for IterMut<'a> {
-  type Item = BlockId;
-
-  /// Advances to the next sibling block in-place
+  /// Allocates a child region under the current block scope
+  ///
+  /// Args:
+  ///     size (`u32`): The size of the region to allocate
   ///
   /// Returns:
-  ///     `Option<Self::Item>`: The block identifier before advancing
-  fn next(&mut self) -> Option<Self::Item> {
-    if self.i.0 == 0 {
-      return None;
-    }
-    let current = self.i;
-    let idx = (self.i.0 as usize) - 1;
-    self.i = self.context.block_arena[idx].next;
-    Some(current)
+  ///     `RegionId`: The allocated child region identifier
+  pub fn region_alloc_child(&mut self, size: u32) -> RegionId {
+    self.context.region_alloc_child(size, self.i)
   }
 }
 
@@ -306,8 +275,8 @@ mod tests {
     let mut context = Context::new();
     let r = context.region_alloc(3);
     
-    let root = context.iter(r).unwrap();
-    assert_eq!(root.block_id().0, 1);
+    let mut root = context.iter(r).unwrap();
+    assert_eq!(root.i.0, 1);
     assert_eq!(root.region_id(), r);
     assert!(root.up().is_none());
     assert!(root.down().is_none());
@@ -336,15 +305,16 @@ mod tests {
     
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.push(); // creates 2
-    let mut iter_mut = iter_mut.up().unwrap();
+    iter_mut.up().unwrap();
     iter_mut.push(); // creates 3
 
     let root = context.iter(r).unwrap();
-    let mut sibs = root.down().unwrap();
+    let mut sibs = root;
+    sibs.down().unwrap();
     let first = sibs.next().unwrap();
-    assert_eq!(first.block_id().0, 2);
+    assert_eq!(first.i.0, 2);
     let second = sibs.next().unwrap();
-    assert_eq!(second.block_id().0, 3);
+    assert_eq!(second.i.0, 3);
     assert!(sibs.next().is_none());
   }
 
@@ -356,14 +326,14 @@ mod tests {
     
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.push(); // creates 2
-    assert_eq!(iter_mut.block_id().0, 2);
+    assert_eq!(iter_mut.i.0, 2);
     assert_eq!(iter_mut.region_id(), r);
 
-    let parent = iter_mut.up().unwrap();
-    assert_eq!(parent.block_id().0, 1);
+    iter_mut.up().unwrap();
+    assert_eq!(iter_mut.i.0, 1);
     
-    let child = parent.down().unwrap();
-    assert_eq!(child.block_id().0, 2);
+    iter_mut.down().unwrap();
+    assert_eq!(iter_mut.i.0, 2);
   }
 
   /// Verifies `step_sibling` functionality on `IterMut`
@@ -374,13 +344,14 @@ mod tests {
     
     let mut iter_mut = context.iter_mut(r).unwrap();
     iter_mut.push(); // creates 2
-    let mut iter_mut = iter_mut.up().unwrap();
+    iter_mut.up().unwrap();
     iter_mut.push(); // creates 3
 
-    let mut sibs = context.iter_mut(r).unwrap().down().unwrap();
-    assert_eq!(sibs.block_id().0, 2);
+    let mut sibs = context.iter_mut(r).unwrap();
+    sibs.down().unwrap();
+    assert_eq!(sibs.i.0, 2);
     assert!(sibs.step_sibling());
-    assert_eq!(sibs.block_id().0, 3);
+    assert_eq!(sibs.i.0, 3);
     assert!(!sibs.step_sibling());
   }
 
@@ -395,14 +366,14 @@ mod tests {
     assert_eq!(iter_mut.find(Symbol(5)), Some(EntryId(50)));
     
     let iter = iter_mut.as_readonly();
-    assert_eq!(iter.block_id().0, 1);
+    assert_eq!(iter.i.0, 1);
   }
 
   /// Verifies correct sentinel handlings for iterators at block `0`
   #[test]
   fn test_iter_invalid_handling() {
     let context = Context::new();
-    let invalid_iter = Iter {
+    let mut invalid_iter = Iter {
       context: &context,
       i: BlockId(0),
     };
@@ -411,13 +382,13 @@ mod tests {
     assert_eq!(invalid_iter.region_id().0, 0);
 
     let mut context_mut = Context::new();
-    let invalid_iter_mut1 = IterMut {
+    let mut invalid_iter_mut1 = IterMut {
       context: &mut context_mut,
       i: BlockId(0),
     };
     assert!(invalid_iter_mut1.up().is_none());
 
-    let invalid_iter_mut2 = IterMut {
+    let mut invalid_iter_mut2 = IterMut {
       context: &mut context_mut,
       i: BlockId(0),
     };
@@ -432,7 +403,6 @@ mod tests {
     
     invalid_iter_mut3.push();
     invalid_iter_mut3.bind(Symbol(1), EntryId(1));
-    assert!(invalid_iter_mut3.next().is_none());
   }
 }
 
