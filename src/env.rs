@@ -326,6 +326,45 @@ impl Context {
       .get(idx)
       .map(|r| (r.begin, r.end))
   }
+
+  /// Links a block to its parent scope
+  ///
+  /// Args:
+  ///     block (`BlockId`): The block identifier to link
+  ///     parent (`BlockId`): The parent block identifier
+  pub(super) fn link_up(&mut self, block: BlockId, parent: BlockId) {
+    if ((block.0) != 0)
+      && ((block.0 as usize) <= (self.block_arena.len()))
+    {
+      self.block_arena[(block.0 as usize) - 1].up = parent;
+    }
+  }
+
+  /// Links a block to its first nested child scope
+  ///
+  /// Args:
+  ///     block (`BlockId`): The parent block identifier
+  ///     child (`BlockId`): The child block identifier
+  pub(super) fn link_down(&mut self, block: BlockId, child: BlockId) {
+    if ((block.0) != 0)
+      && ((block.0 as usize) <= (self.block_arena.len()))
+    {
+      self.block_arena[(block.0 as usize) - 1].down = child;
+    }
+  }
+
+  /// Links a block to its next sibling scope
+  ///
+  /// Args:
+  ///     block (`BlockId`): The block identifier to link
+  ///     next (`BlockId`): The sibling block identifier
+  pub(super) fn link_next(&mut self, block: BlockId, next: BlockId) {
+    if ((block.0) != 0)
+      && ((block.0 as usize) <= (self.block_arena.len()))
+    {
+      self.block_arena[(block.0 as usize) - 1].next = next;
+    }
+  }
 }
 
 #[cfg(test)]
