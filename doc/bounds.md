@@ -1,12 +1,8 @@
-# Bounds and Allocation Safeguards — Remaining Concerns
+# Bounds and Allocation Safeguards
 
 ## Open Issues
 
-### Double-Free on `region_free`
-- `region_free` does not check whether the target `RegionId` is currently active
-- Calling it on an already-freed ID pushes a duplicate onto `region_freelist`
-- Subsequent allocations pop duplicate IDs, causing two live regions to share
-  one `RegionId` and corrupting bindings
+- None
 
 ## Note: Arena Indexing
 

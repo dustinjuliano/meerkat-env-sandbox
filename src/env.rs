@@ -97,6 +97,7 @@ impl Context {
     }
     let interval = self.alloc_block_range(size)?;
     let region_id = if let Some(idx) = self.region_freelist.pop() {
+      self.region_arena[idx as usize].is_active = true;
       self.region_arena[idx as usize].intervals.push(interval);
       self.region_arena[idx as usize].active_interval_used = 0;
       RegionId(idx)
@@ -106,6 +107,7 @@ impl Context {
       }
       let idx = self.region_arena.len() as u32;
       self.region_arena.push(region::Region {
+        is_active: true,
         intervals: vec![interval],
         bindings: HashMap::new(),
         active_interval_used: 0,
@@ -131,6 +133,11 @@ impl Context {
   pub fn region_free(&mut self, region_id: RegionId) {
     let idx = region_id.0 as usize;
     if idx < (self.region_arena.len()) {
+      assert!(
+        self.region_arena[idx].is_active,
+        "Double free of RegionId({})",
+        idx
+      );
       let intervals = std::mem::take(
         &mut self.region_arena[idx].intervals,
       );
@@ -296,8 +303,10 @@ impl Context {
       let region_id = self.block_arena[block_idx].region;
       let region_idx = region_id.0 as usize;
       let region = &self.region_arena[region_idx];
-      if let Some(&entry) = region.bindings.get(&(curr, symbol)) {
-        return Some(entry);
+      if region.is_active {
+        if let Some(&entry) = region.bindings.get(&(curr, symbol)) {
+          return Some(entry);
+        }
       }
       curr = self.block_arena[block_idx].up;
     }
@@ -310,6 +319,10 @@ impl Context {
       let block_idx = (cursor.i.0 as usize) - 1;
       let region_id = self.block_arena[block_idx].region;
       let region_idx = region_id.0 as usize;
+      assert!(
+        self.region_arena[region_idx].is_active,
+        "Cannot bind symbol in an inactive region"
+      );
       self.region_arena[region_idx]
         .bindings
         .insert((cursor.i, symbol), entry);
@@ -322,6 +335,11 @@ impl Context {
       let current = cursor.i;
       let block_idx = (current.0 as usize) - 1;
       let region_id = self.block_arena[block_idx].region;
+      let region_idx = region_id.0 as usize;
+      assert!(
+        self.region_arena[region_idx].is_active,
+        "Cannot push block in an inactive region"
+      );
       let new_block = self.alloc_block_in_region(region_id)?;
       
       let down = self.block_arena[block_idx].down;
@@ -432,6 +450,9 @@ impl Context {
     let idx = id.0 as usize;
     if idx < (self.region_arena.len()) {
       let r = &self.region_arena[idx];
+      if !r.is_active {
+        return None;
+      }
       let mut total = 0u32;
       for interval in &r.intervals {
         debug_assert!(
@@ -466,7 +487,13 @@ impl Context {
     if (block.0 != 0)
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
-      Some(self.block_arena[(block.0 as usize) - 1].region)
+      let region_id = self.block_arena[(block.0 as usize) - 1].region;
+      let region_idx = region_id.0 as usize;
+      if region_idx < self.region_arena.len() && self.region_arena[region_idx].is_active {
+        Some(region_id)
+      } else {
+        None
+      }
     } else {
       None
     }
@@ -694,5 +721,27 @@ mod tests {
     let mut context = Context::new();
     let r = context.region_alloc(0);
     assert!(r.is_none());
+  }
+
+  /// Verifies that double freeing a region panics.
+  #[test]
+  #[should_panic(expected = "Double free of RegionId")]
+  fn test_region_double_free() {
+    let mut context = Context::new();
+    let r = context.region_alloc(5).unwrap();
+    context.region_free(r);
+    context.region_free(r);
+  }
+
+  /// Verifies that looking up the owning region of a block in a freed region returns None.
+  #[test]
+  fn test_freed_block_region_resolution() {
+    let mut context = Context::new();
+    let r = context.region_alloc(5).unwrap();
+    let cursor = context.cursor(r).unwrap();
+    let block = cursor.i;
+    assert_eq!(context.get_region_id_from_block(block), Some(r));
+    context.region_free(r);
+    assert_eq!(context.get_region_id_from_block(block), None);
   }
 }
