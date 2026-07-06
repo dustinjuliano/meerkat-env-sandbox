@@ -559,3 +559,33 @@ fn test_stale_cursor_navigation_vs_lookup() {
   // But lookup on Block 1 must fail because region bindings were cleared
   assert_eq!(context.find(cursor, Symbol(1)), None);
 }
+
+/// Verifies that pushing a large number of siblings works correctly, maintains links,
+/// and allows O(1) appending behavior under the same parent block.
+#[test]
+fn test_many_siblings_navigable() {
+  let mut context = Context::new();
+  // Allocate a large region for blocks
+  let r = context.region_alloc(1000).unwrap();
+  let mut cursor = context.cursor(r).unwrap(); // Parent Block 1
+
+  // Push 500 sibling blocks under Block 1
+  for i in 1..=500 {
+    context.push_block(&mut cursor).unwrap();
+    context.bind(cursor, Symbol(i), EntryId(i as u32));
+    context.up(&mut cursor).unwrap(); // return to Block 1
+  }
+
+  // Go to the first child (Block 2)
+  context.down(&mut cursor).unwrap();
+  assert_eq!(context.find(cursor, Symbol(1)), Some(EntryId(1)));
+
+  // Traverse all 500 siblings in sequence via next()
+  for i in 2..=500 {
+    context.next(&mut cursor).unwrap();
+    assert_eq!(context.find(cursor, Symbol(i)), Some(EntryId(i as u32)));
+  }
+
+  // No more siblings
+  assert!(context.next(&mut cursor).is_none());
+}

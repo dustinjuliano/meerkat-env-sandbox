@@ -120,7 +120,12 @@ impl Context {
       self.region_arena[idx].active_interval_used = 1;
       let root_block = interval.begin;
       debug_assert!(root_block.0 != 0, "allocator must never produce BlockId(0)");
-      self.block_arena[(root_block.0 as usize) - 1].region = region_id;
+      let root_idx = (root_block.0 as usize) - 1;
+      self.block_arena[root_idx].region = region_id;
+      self.block_arena[root_idx].up = BlockId(0);
+      self.block_arena[root_idx].down = BlockId(0);
+      self.block_arena[root_idx].last_child = BlockId(0);
+      self.block_arena[root_idx].next = BlockId(0);
     }
 
     Some(region_id)
@@ -221,6 +226,11 @@ impl Context {
       while (self.block_arena.len()) <= block_idx {
         self.block_arena.push(block::Block::default());
       }
+    } else {
+      self.block_arena[block_idx].up = BlockId(0);
+      self.block_arena[block_idx].down = BlockId(0);
+      self.block_arena[block_idx].last_child = BlockId(0);
+      self.block_arena[block_idx].next = BlockId(0);
     }
     self.block_arena[block_idx].region = region_id;
 
@@ -345,17 +355,26 @@ impl Context {
       let down = self.block_arena[block_idx].down;
       if down.0 == 0 {
         self.block_arena[block_idx].down = new_block;
+        self.block_arena[block_idx].last_child = new_block;
       } else {
-        let mut sib = down;
-        loop {
-          let sib_idx = (sib.0 as usize) - 1;
-          let next = self.block_arena[sib_idx].next;
-          if next.0 == 0 {
-            self.block_arena[sib_idx].next = new_block;
-            break;
+        let last = self.block_arena[block_idx].last_child;
+        if last.0 != 0 {
+          let last_idx = (last.0 as usize) - 1;
+          self.block_arena[last_idx].next = new_block;
+        } else {
+          // Fallback if last_child was not set
+          let mut sib = down;
+          loop {
+            let sib_idx = (sib.0 as usize) - 1;
+            let next = self.block_arena[sib_idx].next;
+            if next.0 == 0 {
+              self.block_arena[sib_idx].next = new_block;
+              break;
+            }
+            sib = next;
           }
-          sib = next;
         }
+        self.block_arena[block_idx].last_child = new_block;
       }
       let new_idx = (new_block.0 as usize) - 1;
       self.block_arena[new_idx].up = current;
@@ -424,16 +443,23 @@ impl Context {
       if down.0 == 0 {
         self.link_down(parent, root);
       } else {
-        let mut sib = down;
-        loop {
-          let sib_idx = (sib.0 as usize) - 1;
-          let next = self.block_arena[sib_idx].next;
-          if next.0 == 0 {
-            self.link_next(sib, root);
-            break;
+        let last = self.block_arena[p_idx].last_child;
+        if last.0 != 0 {
+          self.link_next(last, root);
+        } else {
+          // Fallback if last_child was not set
+          let mut sib = down;
+          loop {
+            let sib_idx = (sib.0 as usize) - 1;
+            let next = self.block_arena[sib_idx].next;
+            if next.0 == 0 {
+              self.link_next(sib, root);
+              break;
+            }
+            sib = next;
           }
-          sib = next;
         }
+        self.link_last_child(parent, root);
       }
     }
     Some(region_id)
@@ -547,6 +573,20 @@ impl Context {
       && ((block.0 as usize) <= (self.block_arena.len()))
     {
       self.block_arena[(block.0 as usize) - 1].down = child;
+      self.block_arena[(block.0 as usize) - 1].last_child = child;
+    }
+  }
+
+  /// Links a block to its last nested child scope
+  ///
+  /// Args:
+  ///     block (`BlockId`): The parent block identifier
+  ///     last_child (`BlockId`): The last child block identifier
+  fn link_last_child(&mut self, block: BlockId, last_child: BlockId) {
+    if ((block.0) != 0)
+      && ((block.0 as usize) <= (self.block_arena.len()))
+    {
+      self.block_arena[(block.0 as usize) - 1].last_child = last_child;
     }
   }
 

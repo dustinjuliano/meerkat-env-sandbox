@@ -21,6 +21,7 @@ pub(super) struct Interval {
 pub(super) struct Block {
   pub(super) up: BlockId,
   pub(super) down: BlockId,
+  pub(super) last_child: BlockId,
   pub(super) next: BlockId,
   pub(super) region: super::RegionId,
 }
@@ -45,6 +46,7 @@ mod tests {
     let block = Block::default();
     assert_eq!(block.up.0, 0);
     assert_eq!(block.down.0, 0);
+    assert_eq!(block.last_child.0, 0);
     assert_eq!(block.next.0, 0);
     assert_eq!(block.region.0, 0);
   }
