@@ -24,7 +24,7 @@ Symbol Association:
 - "d" => Symbol(4)
 */
 
-use env::env::{Context, EntryId, RegionId, Symbol, Cursor};
+use meerkat_lib::env::{Context, Cursor, RegionId, Symbol};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -34,7 +34,7 @@ struct Entry {
 }
 
 struct Program {
-  ctx: Context,
+  ctx: Context<usize>,
   mem: Vec<Entry>,
   root_region: RegionId,
 }
@@ -55,25 +55,25 @@ fn simulate_lexical_scoping() -> Option<Program> {
   let root_region = ctx.region_alloc(8)?;
   let mut cursor = ctx.cursor(root_region)?;
 
-  ctx.bind(cursor, Symbol(1), EntryId(0));
-  ctx.bind(cursor, Symbol(2), EntryId(1));
+  ctx.bind(cursor, Symbol(1), 0);
+  ctx.bind(cursor, Symbol(2), 1);
 
   ctx.push_block(&mut cursor)?;
-  ctx.bind(cursor, Symbol(2), EntryId(2));
+  ctx.bind(cursor, Symbol(2), 2);
 
   ctx.push_block(&mut cursor)?;
-  ctx.bind(cursor, Symbol(3), EntryId(3));
+  ctx.bind(cursor, Symbol(3), 3);
 
   ctx.up(&mut cursor)?;
   ctx.push_block(&mut cursor)?;
-  ctx.bind(cursor, Symbol(2), EntryId(4));
-  ctx.bind(cursor, Symbol(3), EntryId(5));
+  ctx.bind(cursor, Symbol(2), 4);
+  ctx.bind(cursor, Symbol(3), 5);
 
   ctx.up(&mut cursor)?;
-  ctx.bind(cursor, Symbol(3), EntryId(6));
+  ctx.bind(cursor, Symbol(3), 6);
 
   ctx.up(&mut cursor)?;
-  ctx.bind(cursor, Symbol(4), EntryId(7));
+  ctx.bind(cursor, Symbol(4), 7);
 
   Some(Program {
     ctx,
@@ -83,8 +83,8 @@ fn simulate_lexical_scoping() -> Option<Program> {
 }
 
 fn find<'a>(p: &'a Program, cursor: Cursor, sym: Symbol) -> Option<&'a Entry> {
-  let eid = p.ctx.find(cursor, sym)?;
-  Some(&p.mem[eid.0 as usize])
+  let idx = p.ctx.find(cursor, sym)?;
+  Some(&p.mem[*idx])
 }
 
 fn simulate_eval(p: &Program) -> Option<()> {
@@ -156,9 +156,9 @@ fn simulate_async_continuations_with_cursors() -> Option<()> {
   let mut task2_cursor = ctx.cursor(root)?;
 
   // Task 1 runs, mutates context
-  ctx.bind(task1_cursor, Symbol(1), EntryId(1));
+  ctx.bind(task1_cursor, Symbol(1), 1);
   ctx.push_block(&mut task1_cursor)?;
-  ctx.bind(task1_cursor, Symbol(2), EntryId(2));
+  ctx.bind(task1_cursor, Symbol(2), 2);
 
   // Task 2 resumes. Cursors are absolutely consistent because they only store index IDs.
   // The underlying Context is updated sequentially, so Task 2 instantly sees Task 1's
@@ -171,7 +171,7 @@ fn simulate_async_continuations_with_cursors() -> Option<()> {
 
   // Task 1 resumes, adds another block
   ctx.push_block(&mut task1_cursor)?;
-  ctx.bind(task1_cursor, Symbol(3), EntryId(3));
+  ctx.bind(task1_cursor, Symbol(3), 3);
 
   // Task 2 can navigate to the new block
   ctx.down(&mut task2_cursor)?;
@@ -186,11 +186,11 @@ fn simulate_region_usability() -> Option<()> {
   // Allocate a root region
   let r1 = ctx.region_alloc(4)?;
   let mut c1 = ctx.cursor(r1)?;
-  ctx.bind(c1, Symbol(1), EntryId(1));
+  ctx.bind(c1, Symbol(1), 1);
 
   // Create a child region, cursor moves to its root block
   let r2 = ctx.push_region(&mut c1)?;
-  ctx.bind(c1, Symbol(2), EntryId(2));
+  ctx.bind(c1, Symbol(2), 2);
 
   // Cursor in child region can lexically find bindings from parent region
   ctx.find(c1, Symbol(1));
@@ -212,12 +212,12 @@ fn simulate_class_hierarchy_regions() -> Option<()> {
   // Top-level scope region
   let global_region = ctx.region_alloc(10)?;
   let global_cursor = ctx.cursor(global_region)?;
-  ctx.bind(global_cursor, Symbol(100), EntryId(100)); // global variable
+  ctx.bind(global_cursor, Symbol(100), 100); // global variable
 
   // Class A region (lexical scope of the class)
   let mut class_a_builder = global_cursor; // copy the cursor
   let class_a_region = ctx.push_region(&mut class_a_builder)?;
-  ctx.bind(class_a_builder, Symbol(200), EntryId(200)); // Class A member
+  ctx.bind(class_a_builder, Symbol(200), 200); // Class A member
 
   // Method A.foo region (lexical scope of the method/field)
   let mut method_foo_builder = class_a_builder; // copy the cursor
@@ -225,10 +225,10 @@ fn simulate_class_hierarchy_regions() -> Option<()> {
   
   // Inside the method, everything below is blocks
   ctx.push_block(&mut method_foo_builder)?;
-  ctx.bind(method_foo_builder, Symbol(300), EntryId(300)); // Local variable in block 1
+  ctx.bind(method_foo_builder, Symbol(300), 300); // Local variable in block 1
   
   ctx.push_block(&mut method_foo_builder)?;
-  ctx.bind(method_foo_builder, Symbol(301), EntryId(301)); // Local variable in block 2
+  ctx.bind(method_foo_builder, Symbol(301), 301); // Local variable in block 2
 
   // Method foo cursor can resolve symbols all the way up to global
   ctx.find(method_foo_builder, Symbol(301)); // Found in current block
@@ -239,7 +239,7 @@ fn simulate_class_hierarchy_regions() -> Option<()> {
   // Class B region (spawned from global_cursor so it's sibling to Class A)
   let mut class_b_builder = global_cursor; // copy global cursor
   let class_b_region = ctx.push_region(&mut class_b_builder)?;
-  ctx.bind(class_b_builder, Symbol(400), EntryId(400)); // Class B member
+  ctx.bind(class_b_builder, Symbol(400), 400); // Class B member
 
   // Method B.bar region
   let mut method_bar_builder = class_b_builder; // copy class B cursor
@@ -247,7 +247,7 @@ fn simulate_class_hierarchy_regions() -> Option<()> {
   
   // Method bar blocks
   ctx.push_block(&mut method_bar_builder)?;
-  ctx.bind(method_bar_builder, Symbol(500), EntryId(500));
+  ctx.bind(method_bar_builder, Symbol(500), 500);
   
   // Method bar can resolve Class B and Global, but NOT Class A
   ctx.find(method_bar_builder, Symbol(500)); // Found in current block

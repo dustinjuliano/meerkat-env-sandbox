@@ -1,11 +1,23 @@
-//! Environment context managing block allocations and tracking
+//! Environment context managing block allocations and tracking.
 //!
 //! # Sentinel conventions
 //!
 //! - [`BlockId(0)`](BlockId) is the null/sentinel value. Every arena access first
-//!   checks `id.0 != 0` before computing an index.
-//! - [`RegionId(0)`](RegionId) is **not** a sentinel; slot 0 is a valid live region.
-//!   Do not treat `RegionId(0)` as "no region".
+//!   checks `id.0 != 0` before computing an index
+//! - [`RegionId(0)`](RegionId) is **not** a sentinel; slot 0 is a valid live region
+//!   Do not treat `RegionId(0)` as "no region"
+//!
+//! # Caller Responsibility
+//!
+//! The environment context `Context<T>` is generic over the value type `T`
+//! stored in the region bindings. The caller must assume responsibility for
+//! `T` and its reference, copy, and clone semantics. Just because a value
+//! type implements `Copy` or `Clone` does not mean that the system's stored
+//! values cannot become out of date or stale with respect to how those
+//! values are being used. Storing values in the internal hashmap does not
+//! guarantee they remain fresh or in sync with external state. A retrieved
+//! reference or copy may represent state that has since become obsolete or
+//! invalid relative to the caller's domain.
 
 mod alloc;
 mod block;
@@ -13,9 +25,9 @@ pub mod cursor;
 mod region;
 use self::block::BlockId;
 use self::block::Interval;
-use std::collections::HashMap;
 pub use self::cursor::Cursor;
 use alloc::BlockAllocator;
+use std::collections::HashMap;
 
 /// The maximum block identifier that may appear as the `begin` of an interval.
 ///
@@ -43,745 +55,972 @@ pub struct RegionId(pub u32);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Symbol(pub u32);
 
-/// An opaque handle mapped to an external Entry storage
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct EntryId(pub u32);
-
-/// Context managing block arena, regions, and range allocations
-pub struct Context {
-  block_arena: Vec<block::Block>,
-  region_arena: Vec<region::Region>,
-  region_freelist: Vec<u32>,
-  allocator: BlockAllocator,
+/// Context managing block arena, regions, and range allocations.
+///
+/// Holds the active blocks, region mapping, and freelists. Parameterized
+/// by `T` for generic value binding.
+pub struct Context<T = u32> {
+    block_arena: Vec<block::Block>,
+    region_arena: Vec<region::Region<T>>,
+    region_freelist: Vec<u32>,
+    allocator: BlockAllocator,
 }
 
-impl Default for Context {
-  /// Creates the default environment context
-  ///
-  /// Returns:
-  ///     `Context`: The default context instance
-  fn default() -> Self {
-    Context {
-      block_arena: Vec::new(),
-      region_arena: Vec::new(),
-      region_freelist: Vec::new(),
-      allocator: BlockAllocator::new(),
+impl<T> Default for Context<T> {
+    /// Creates the default environment context.
+    ///
+    /// Returns:
+    ///     `Context<T>`: The default context instance
+    fn default() -> Self {
+        Context {
+            block_arena: Vec::new(),
+            region_arena: Vec::new(),
+            region_freelist: Vec::new(),
+            allocator: BlockAllocator::new(),
+        }
     }
-  }
 }
 
-impl Context {
-  /// Creates a new empty environment context
-  ///
-  /// Returns:
-  ///     `Context`: The newly created context instance
-  pub fn new() -> Self {
-    Self::default()
-  }
-
-  /// Allocates a block range of size from the freelist or arena
-  fn alloc_block_range(&mut self, size: u32) -> Option<Interval> {
-    self.allocator.alloc_block_range(size, &mut self.block_arena)
-  }
-
-  /// Allocates a contiguous run of blocks representing a region
-  ///
-  /// Args:
-  ///     size (`u32`): The number of blocks requested for the region
-  ///
-  /// Returns:
-  ///     `RegionId`: A handle to the allocated region
-  pub fn region_alloc(&mut self, size: u32) -> Option<RegionId> {
-    if size == 0 {
-      return None;
-    }
-    let interval = self.alloc_block_range(size)?;
-    let region_id = if let Some(idx) = self.region_freelist.pop() {
-      self.region_arena[idx as usize].is_active = true;
-      self.region_arena[idx as usize].intervals.push(interval);
-      self.region_arena[idx as usize].active_interval_used = 0;
-      RegionId(idx)
-    } else {
-      if self.region_arena.len() > MAX_REGION_ID as usize {
-        return None;
-      }
-      let idx = self.region_arena.len() as u32;
-      self.region_arena.push(region::Region {
-        is_active: true,
-        intervals: vec![interval],
-        bindings: HashMap::new(),
-        active_interval_used: 0,
-      });
-      RegionId(idx)
-    };
-
-    if size > 0 {
-      let idx = region_id.0 as usize;
-      self.region_arena[idx].active_interval_used = 1;
-      let root_block = interval.begin;
-      debug_assert!(root_block.0 != 0, "allocator must never produce BlockId(0)");
-      let root_idx = (root_block.0 as usize) - 1;
-      self.block_arena[root_idx].region = region_id;
-      self.block_arena[root_idx].up = BlockId(0);
-      self.block_arena[root_idx].down = BlockId(0);
-      self.block_arena[root_idx].last_child = BlockId(0);
-      self.block_arena[root_idx].next = BlockId(0);
+impl<T> Context<T> {
+    /// Creates a new empty environment context.
+    ///
+    /// Returns:
+    ///     `Context<T>`: The newly created context instance
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    Some(region_id)
-  }
+    /// Allocates a block range of size from the freelist or arena.
+    ///
+    /// Args:
+    ///     `size` (`u32`): The number of blocks requested
+    ///
+    /// Returns:
+    ///     `Option<Interval>`: The allocated block interval if successful
+    fn alloc_block_range(&mut self, size: u32) -> Option<Interval> {
+        self.allocator
+            .alloc_block_range(size, &mut self.block_arena)
+    }
 
-  /// Releases a region handle and returns its blocks to the freelist
-  ///
-  /// Args:
-  ///     region_id (`RegionId`): The region handle to release
-  pub fn region_free(&mut self, region_id: RegionId) {
-    let idx = region_id.0 as usize;
-    if idx < (self.region_arena.len()) {
-      assert!(
-        self.region_arena[idx].is_active,
-        "Double free of RegionId({})",
-        idx
-      );
-      let intervals = std::mem::take(
-        &mut self.region_arena[idx].intervals,
-      );
-      self.region_arena[idx].clear();
-
-      for interval in intervals {
-        if (interval.begin.0 != 0)
-          && (interval.end.0 != 0)
-          && ((interval.end.0) > (interval.begin.0))
-        {
-          self.allocator.block_freelist.push(interval);
+    /// Allocates a contiguous run of blocks representing a region.
+    ///
+    /// Args:
+    ///     `size` (`u32`): The number of blocks requested for the region
+    ///
+    /// Returns:
+    ///     `Option<RegionId>`: A handle to the allocated region, or `None`
+    ///         if allocation fails
+    pub fn region_alloc(&mut self, size: u32) -> Option<RegionId> {
+        if size == 0 {
+            return None;
         }
-      }
-      self.region_freelist.push(region_id.0);
-    }
-  }
-
-  /// Allocates a new block within the given region, growing if needed
-  ///
-  /// Args:
-  ///     region_id (`RegionId`): The region identifier to grow
-  ///
-  /// Returns:
-  ///     `BlockId`: The allocated block identifier
-  fn alloc_block_in_region(
-    &mut self,
-    region_id: RegionId,
-  ) -> Option<BlockId> {
-    let idx = region_id.0 as usize;
-    {
-      let region = &mut self.region_arena[idx];
-      let has_space = if let Some(last_interval) = region.intervals.last()
-      {
-        debug_assert!(
-          last_interval.end.0 >= last_interval.begin.0,
-          "interval invariant violated"
-        );
-        let size = (last_interval.end.0) - (last_interval.begin.0);
-        region.active_interval_used < size
-      } else {
-        false
-      };
-
-      if has_space {
-        region.active_interval_used += 1;
-      } else {
-        let new_interval = self.alloc_block_range(1)?;
-        let region = &mut self.region_arena[idx];
-        let mut coalesced = false;
-        if let Some(last_interval) = region.intervals.last_mut() {
-          if last_interval.end.0 == new_interval.begin.0 {
-            last_interval.end = new_interval.end;
-            region.active_interval_used += 1;
-            coalesced = true;
-          }
-        }
-        if !coalesced {
-          region.intervals.push(new_interval);
-          region.active_interval_used = 1;
-        }
-      }
-    }
-
-    let region = &self.region_arena[idx];
-    debug_assert!(
-      region.active_interval_used > 0,
-      "active_interval_used underflow: implementation error"
-    );
-    let offset = (region.active_interval_used) - 1;
-    // Safety: The region is guaranteed to have at least one interval because either has_space was true
-    // (so an interval already existed) or a new interval was successfully allocated and pushed/coalesced.
-    debug_assert!(
-      !region.intervals.is_empty(),
-      "alloc_block_in_region: region has no intervals; implementation error"
-    );
-    let begin_val = region.intervals.last().unwrap().begin.0;
-    let new_block_id = BlockId(begin_val + offset);
-
-    let block_idx = (new_block_id.0 as usize) - 1;
-    if block_idx >= (self.block_arena.len()) {
-      while (self.block_arena.len()) <= block_idx {
-        self.block_arena.push(block::Block::default());
-      }
-    } else {
-      self.block_arena[block_idx].up = BlockId(0);
-      self.block_arena[block_idx].down = BlockId(0);
-      self.block_arena[block_idx].last_child = BlockId(0);
-      self.block_arena[block_idx].next = BlockId(0);
-    }
-    self.block_arena[block_idx].region = region_id;
-
-    Some(new_block_id)
-  }
-
-  /// Spawns a cursor starting at the region's begin block
-  ///
-  /// Args:
-  ///     id (`RegionId`): The region identifier to point to
-  ///
-  /// Returns:
-  ///     `Option<Cursor>`: The cursor if valid
-  pub fn cursor(&self, id: RegionId) -> Option<Cursor> {
-    let idx = id.0 as usize;
-    if idx < (self.region_arena.len()) {
-      let r = &self.region_arena[idx];
-      if self.region_size(id).is_some() {
-        if let Some(first_interval) = r.intervals.first() {
-          return Some(Cursor {
-            i: first_interval.begin,
-          });
-        }
-      }
-    }
-    None
-  }
-
-  /// Navigates to the parent block scope in-place
-  pub fn up(&self, cursor: &mut Cursor) -> Option<()> {
-    if cursor.i.0 == 0 {
-      return None;
-    }
-    let idx = (cursor.i.0 as usize) - 1;
-    let parent = self.block_arena[idx].up;
-    if parent.0 == 0 {
-      None
-    } else {
-      cursor.i = parent;
-      Some(())
-    }
-  }
-
-  /// Navigates to the first child block scope in-place
-  pub fn down(&self, cursor: &mut Cursor) -> Option<()> {
-    if cursor.i.0 == 0 {
-      return None;
-    }
-    let idx = (cursor.i.0 as usize) - 1;
-    let child = self.block_arena[idx].down;
-    if child.0 == 0 {
-      None
-    } else {
-      cursor.i = child;
-      Some(())
-    }
-  }
-
-  /// Navigates to the next sibling block scope in-place
-  pub fn next(&self, cursor: &mut Cursor) -> Option<()> {
-    if cursor.i.0 == 0 {
-      return None;
-    }
-    let idx = (cursor.i.0 as usize) - 1;
-    let next = self.block_arena[idx].next;
-    if next.0 == 0 {
-      None
-    } else {
-      cursor.i = next;
-      Some(())
-    }
-  }
-
-  /// Resolves a symbol lexically by climbing parent scopes from the cursor
-  pub fn find(&self, cursor: Cursor, symbol: Symbol) -> Option<EntryId> {
-    let mut curr = cursor.i;
-    while curr.0 != 0 {
-      let curr_val = curr.0;
-      let block_idx = (curr_val as usize) - 1;
-      let region_id = self.block_arena[block_idx].region;
-      let region_idx = region_id.0 as usize;
-      let region = &self.region_arena[region_idx];
-      if region.is_active {
-        if let Some(&entry) = region.bindings.get(&(curr, symbol)) {
-          return Some(entry);
-        }
-      }
-      curr = self.block_arena[block_idx].up;
-    }
-    None
-  }
-
-  /// Binds a symbol to the cursor's current block with the given entry identifier
-  pub fn bind(&mut self, cursor: Cursor, symbol: Symbol, entry: EntryId) {
-    if cursor.i.0 != 0 {
-      let block_idx = (cursor.i.0 as usize) - 1;
-      let region_id = self.block_arena[block_idx].region;
-      let region_idx = region_id.0 as usize;
-      assert!(
-        self.region_arena[region_idx].is_active,
-        "Cannot bind symbol in an inactive region"
-      );
-      self.region_arena[region_idx]
-        .bindings
-        .insert((cursor.i, symbol), entry);
-    }
-  }
-
-  /// Allocates a new child block in the current block's region and moves down to it
-  pub fn push_block(&mut self, cursor: &mut Cursor) -> Option<()> {
-    if cursor.i.0 != 0 {
-      let current = cursor.i;
-      let block_idx = (current.0 as usize) - 1;
-      let region_id = self.block_arena[block_idx].region;
-      let region_idx = region_id.0 as usize;
-      assert!(
-        self.region_arena[region_idx].is_active,
-        "Cannot push block in an inactive region"
-      );
-      let new_block = self.alloc_block_in_region(region_id)?;
-      
-      let down = self.block_arena[block_idx].down;
-      if down.0 == 0 {
-        self.block_arena[block_idx].down = new_block;
-        self.block_arena[block_idx].last_child = new_block;
-      } else {
-        let last = self.block_arena[block_idx].last_child;
-        if last.0 != 0 {
-          let last_idx = (last.0 as usize) - 1;
-          self.block_arena[last_idx].next = new_block;
+        let interval = self.alloc_block_range(size)?;
+        let region_id = if let Some(idx) = self.region_freelist.pop() {
+            self.region_arena[idx as usize].is_active = true;
+            self.region_arena[idx as usize].intervals.push(interval);
+            self.region_arena[idx as usize].active_interval_used = 0;
+            RegionId(idx)
         } else {
-          // Fallback if last_child was not set
-          let mut sib = down;
-          loop {
-            let sib_idx = (sib.0 as usize) - 1;
-            let next = self.block_arena[sib_idx].next;
-            if next.0 == 0 {
-              self.block_arena[sib_idx].next = new_block;
-              break;
+            if self.region_arena.len() > MAX_REGION_ID as usize {
+                return None;
             }
-            sib = next;
-          }
+            let idx = self.region_arena.len() as u32;
+            self.region_arena.push(region::Region {
+                is_active: true,
+                intervals: vec![interval],
+                bindings: HashMap::new(),
+                active_interval_used: 0,
+            });
+            RegionId(idx)
+        };
+
+        if size > 0 {
+            let idx = region_id.0 as usize;
+            self.region_arena[idx].active_interval_used = 1;
+            let root_block = interval.begin;
+            debug_assert!(root_block.0 != 0, "allocator must never produce BlockId(0)");
+            let root_idx = (root_block.0 as usize) - 1;
+            self.block_arena[root_idx].region = region_id;
+            self.block_arena[root_idx].up = BlockId(0);
+            self.block_arena[root_idx].down = BlockId(0);
+            self.block_arena[root_idx].last_child = BlockId(0);
+            self.block_arena[root_idx].next = BlockId(0);
         }
-        self.block_arena[block_idx].last_child = new_block;
-      }
-      let new_idx = (new_block.0 as usize) - 1;
-      self.block_arena[new_idx].up = current;
-      cursor.i = new_block;
-      Some(())
-    } else {
-      None
-    }
-  }
 
-  /// Allocates a new child region nested under the parent cursor's current block
-  /// and moves the cursor into the root block of that region.
-  pub fn push_region(&mut self, cursor: &mut Cursor) -> Option<RegionId> {
-    if cursor.i.0 != 0 {
-      let parent = cursor.i;
-      let region_id = self.region_alloc_child(1, parent)?;
-      // Safety: region_alloc_child succeeded, which guarantees that the region's intervals vector
-      // is non-empty. Thus, first() is guaranteed to return Some, and unwrap() will not panic.
-      debug_assert!(
-        !self.region_arena[region_id.0 as usize].intervals.is_empty(),
-        "intervals must not be empty after successful child region allocation"
-      );
-      let root = self.region_arena[region_id.0 as usize]
-        .intervals
-        .first()
-        .unwrap()
-        .begin;
-      cursor.i = root;
-      Some(region_id)
-    } else {
-      None
-    }
-  }
-
-  /// Allocates a child region nested under a parent block scope
-  ///
-  /// Args:
-  ///     size (`u32`): The number of blocks requested for the region
-  ///     parent (`BlockId`): The parent block scope identifier
-  ///
-  /// Returns:
-  ///     `RegionId`: The allocated child region identifier
-  fn region_alloc_child(
-    &mut self,
-    size: u32,
-    parent: BlockId,
-  ) -> Option<RegionId> {
-    debug_assert!(size > 0, "region_alloc_child: size must be > 0");
-    let region_id = self.region_alloc(size)?;
-    debug_assert!(
-      !self.region_arena[region_id.0 as usize].intervals.is_empty(),
-      "region_alloc_child: region has no intervals after alloc; implementation error"
-    );
-    let root = self.region_arena[region_id.0 as usize]
-      .intervals
-      .first()
-      .unwrap()
-      .begin;
-    self.link_up(root, parent);
-
-    if (parent.0 != 0)
-      && ((parent.0 as usize) <= (self.block_arena.len()))
-    {
-      let p_idx = (parent.0 as usize) - 1;
-      let down = self.block_arena[p_idx].down;
-      if down.0 == 0 {
-        self.link_down(parent, root);
-      } else {
-        let last = self.block_arena[p_idx].last_child;
-        if last.0 != 0 {
-          self.link_next(last, root);
-        } else {
-          // Fallback if last_child was not set
-          let mut sib = down;
-          loop {
-            let sib_idx = (sib.0 as usize) - 1;
-            let next = self.block_arena[sib_idx].next;
-            if next.0 == 0 {
-              self.link_next(sib, root);
-              break;
-            }
-            sib = next;
-          }
-        }
-        self.link_last_child(parent, root);
-      }
-    }
-    Some(region_id)
-  }
-
-  /// Returns the size of the allocated region
-  ///
-  /// Args:
-  ///     id (`RegionId`): The region identifier to inspect
-  ///
-  /// Returns:
-  ///     `Option<u32>`: The total size of the region if valid
-  pub fn region_size(&self, id: RegionId) -> Option<u32> {
-    let idx = id.0 as usize;
-    if idx < (self.region_arena.len()) {
-      let r = &self.region_arena[idx];
-      if !r.is_active {
-        return None;
-      }
-      let mut total = 0u32;
-      for interval in &r.intervals {
-        debug_assert!(
-          interval.end.0 >= interval.begin.0,
-          "interval invariant violated"
-        );
-        total += (interval.end.0) - (interval.begin.0);
-      }
-      if total > 0 {
-        return Some(total);
-      }
-    }
-    None
-  }
-
-  /// Returns the total capacity of the backing block array
-  ///
-  /// Returns:
-  ///     `usize`: The total number of allocated backing blocks
-  pub fn blocks_capacity(&self) -> usize {
-    self.block_arena.len()
-  }
-
-  /// Returns the region identifier of a block
-  ///
-  /// Args:
-  ///     block (`BlockId`): The block identifier to inspect
-  ///
-  /// Returns:
-  ///     `Option<RegionId>`: The owning region identifier if valid
-  fn get_region_id_from_block(&self, block: BlockId) -> Option<RegionId> {
-    if (block.0 != 0)
-      && ((block.0 as usize) <= (self.block_arena.len()))
-    {
-      let region_id = self.block_arena[(block.0 as usize) - 1].region;
-      let region_idx = region_id.0 as usize;
-      if region_idx < self.region_arena.len() && self.region_arena[region_idx].is_active {
         Some(region_id)
-      } else {
+    }
+
+    /// Releases a region handle and returns its blocks to the freelist.
+    ///
+    /// Args:
+    ///     `region_id` (`RegionId`): The region handle to release
+    pub fn region_free(&mut self, region_id: RegionId) {
+        let idx = region_id.0 as usize;
+        if idx < (self.region_arena.len()) {
+            assert!(
+                self.region_arena[idx].is_active,
+                "Double free of RegionId({})",
+                idx
+            );
+            let intervals = std::mem::take(&mut self.region_arena[idx].intervals);
+            self.region_arena[idx].clear();
+
+            for interval in intervals {
+                if (interval.begin.0 != 0)
+                    && (interval.end.0 != 0)
+                    && ((interval.end.0) > (interval.begin.0))
+                {
+                    self.allocator.block_freelist.push(interval);
+                }
+            }
+            self.region_freelist.push(region_id.0);
+        }
+    }
+
+    /// Allocates a new block within the given region, growing if needed.
+    ///
+    /// Args:
+    ///     `region_id` (`RegionId`): The region identifier to grow
+    ///
+    /// Returns:
+    ///     `Option<BlockId>`: The allocated block identifier if successful
+    fn alloc_block_in_region(&mut self, region_id: RegionId) -> Option<BlockId> {
+        let idx = region_id.0 as usize;
+        {
+            let region = &mut self.region_arena[idx];
+            let has_space = if let Some(last_interval) = region.intervals.last() {
+                debug_assert!(
+                    last_interval.end.0 >= last_interval.begin.0,
+                    "interval invariant violated"
+                );
+                let size = (last_interval.end.0) - (last_interval.begin.0);
+                region.active_interval_used < size
+            } else {
+                false
+            };
+
+            if has_space {
+                region.active_interval_used += 1;
+            } else {
+                let new_interval = self.alloc_block_range(1)?;
+                let region = &mut self.region_arena[idx];
+                let mut coalesced = false;
+                if let Some(last_interval) = region.intervals.last_mut() {
+                    if last_interval.end.0 == new_interval.begin.0 {
+                        last_interval.end = new_interval.end;
+                        region.active_interval_used += 1;
+                        coalesced = true;
+                    }
+                }
+                if !coalesced {
+                    region.intervals.push(new_interval);
+                    region.active_interval_used = 1;
+                }
+            }
+        }
+
+        let region = &self.region_arena[idx];
+        debug_assert!(
+            region.active_interval_used > 0,
+            "active_interval_used underflow: implementation error"
+        );
+        let offset = (region.active_interval_used) - 1;
+        debug_assert!(
+            !region.intervals.is_empty(),
+            "alloc_block_in_region: region has no intervals; implementation error"
+        );
+        let begin_val = region.intervals.last().unwrap().begin.0;
+        let new_block_id = BlockId(begin_val + offset);
+
+        let block_idx = (new_block_id.0 as usize) - 1;
+        if block_idx >= (self.block_arena.len()) {
+            while (self.block_arena.len()) <= block_idx {
+                self.block_arena.push(block::Block::default());
+            }
+        } else {
+            self.block_arena[block_idx].up = BlockId(0);
+            self.block_arena[block_idx].down = BlockId(0);
+            self.block_arena[block_idx].last_child = BlockId(0);
+            self.block_arena[block_idx].next = BlockId(0);
+        }
+        self.block_arena[block_idx].region = region_id;
+
+        Some(new_block_id)
+    }
+
+    /// Spawns a cursor starting at the region's begin block.
+    ///
+    /// Args:
+    ///     `id` (`RegionId`): The region identifier to point to
+    ///
+    /// Returns:
+    ///     `Option<Cursor>`: The cursor if valid
+    pub fn cursor(&self, id: RegionId) -> Option<Cursor> {
+        let idx = id.0 as usize;
+        if idx < (self.region_arena.len()) {
+            let r = &self.region_arena[idx];
+            if self.region_size(id).is_some() {
+                if let Some(first_interval) = r.intervals.first() {
+                    return Some(Cursor {
+                        i: first_interval.begin,
+                    });
+                }
+            }
+        }
         None
-      }
-    } else {
-      None
     }
-  }
 
-  /// Returns the number of items in the block freelist
-  ///
-  /// Returns:
-  ///     `usize`: The length of the block freelist
-  pub fn block_freelist_len(&self) -> usize {
-    self.allocator.block_freelist.len()
-  }
-
-  /// Returns boundaries of a freed block interval at the given index
-  ///
-  /// Args:
-  ///     idx (`usize`): The index into the block freelist
-  ///
-  /// Returns:
-  ///     `Option<(BlockId, BlockId)>`: The boundaries of the interval
-  fn block_freelist_interval(
-    &self,
-    idx: usize,
-  ) -> Option<(BlockId, BlockId)> {
-    self.allocator
-      .block_freelist
-      .get(idx)
-      .map(|r| (r.begin, r.end))
-  }
-
-  /// Links a block to its parent scope
-  ///
-  /// Args:
-  ///     block (`BlockId`): The block identifier to link
-  ///     parent (`BlockId`): The parent block identifier
-  fn link_up(&mut self, block: BlockId, parent: BlockId) {
-    if ((block.0) != 0)
-      && ((block.0 as usize) <= (self.block_arena.len()))
-    {
-      self.block_arena[(block.0 as usize) - 1].up = parent;
+    /// Navigates to the parent block scope in-place.
+    ///
+    /// Args:
+    ///     `cursor` (`&mut Cursor`): The cursor to navigate up
+    ///
+    /// Returns:
+    ///     `Option<()>`: `Some(())` if navigation was successful
+    pub fn up(&self, cursor: &mut Cursor) -> Option<()> {
+        if cursor.i.0 == 0 {
+            return None;
+        }
+        debug_assert!(
+            (cursor.i.0 as usize) <= self.block_arena.len(),
+            "Cursor block index out of bounds"
+        );
+        debug_assert!(
+            (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                < self.region_arena.len(),
+            "Region index out of bounds"
+        );
+        let idx = (cursor.i.0 as usize) - 1;
+        let parent = self.block_arena[idx].up;
+        if parent.0 == 0 {
+            None
+        } else {
+            cursor.i = parent;
+            Some(())
+        }
     }
-  }
 
-  /// Links a block to its first nested child scope
-  ///
-  /// Args:
-  ///     block (`BlockId`): The parent block identifier
-  ///     child (`BlockId`): The child block identifier
-  fn link_down(&mut self, block: BlockId, child: BlockId) {
-    if ((block.0) != 0)
-      && ((block.0 as usize) <= (self.block_arena.len()))
-    {
-      self.block_arena[(block.0 as usize) - 1].down = child;
-      self.block_arena[(block.0 as usize) - 1].last_child = child;
+    /// Navigates to the first child block scope in-place.
+    ///
+    /// Args:
+    ///     `cursor` (`&mut Cursor`): The cursor to navigate down
+    ///
+    /// Returns:
+    ///     `Option<()>`: `Some(())` if navigation was successful
+    pub fn down(&self, cursor: &mut Cursor) -> Option<()> {
+        if cursor.i.0 == 0 {
+            return None;
+        }
+        debug_assert!(
+            (cursor.i.0 as usize) <= self.block_arena.len(),
+            "Cursor block index out of bounds"
+        );
+        debug_assert!(
+            (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                < self.region_arena.len(),
+            "Region index out of bounds"
+        );
+        let idx = (cursor.i.0 as usize) - 1;
+        let child = self.block_arena[idx].down;
+        if child.0 == 0 {
+            None
+        } else {
+            cursor.i = child;
+            Some(())
+        }
     }
-  }
 
-  /// Links a block to its last nested child scope
-  ///
-  /// Args:
-  ///     block (`BlockId`): The parent block identifier
-  ///     last_child (`BlockId`): The last child block identifier
-  fn link_last_child(&mut self, block: BlockId, last_child: BlockId) {
-    if ((block.0) != 0)
-      && ((block.0 as usize) <= (self.block_arena.len()))
-    {
-      self.block_arena[(block.0 as usize) - 1].last_child = last_child;
+    /// Navigates to the next sibling block scope in-place.
+    ///
+    /// Args:
+    ///     `cursor` (`&mut Cursor`): The cursor to navigate to the sibling of
+    ///
+    /// Returns:
+    ///     `Option<()>`: `Some(())` if navigation was successful
+    pub fn next(&self, cursor: &mut Cursor) -> Option<()> {
+        if cursor.i.0 == 0 {
+            return None;
+        }
+        debug_assert!(
+            (cursor.i.0 as usize) <= self.block_arena.len(),
+            "Cursor block index out of bounds"
+        );
+        debug_assert!(
+            (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                < self.region_arena.len(),
+            "Region index out of bounds"
+        );
+        let idx = (cursor.i.0 as usize) - 1;
+        let next = self.block_arena[idx].next;
+        if next.0 == 0 {
+            None
+        } else {
+            cursor.i = next;
+            Some(())
+        }
     }
-  }
 
-  /// Links a block to its next sibling scope
-  ///
-  /// Args:
-  ///     block (`BlockId`): The block identifier to link
-  ///     next (`BlockId`): The sibling block identifier
-  fn link_next(&mut self, block: BlockId, next: BlockId) {
-    if ((block.0) != 0)
-      && ((block.0 as usize) <= (self.block_arena.len()))
-    {
-      self.block_arena[(block.0 as usize) - 1].next = next;
+    /// Resolves a symbol lexically by climbing parent scopes from the cursor.
+    ///
+    /// Returns a reference to the bound value of type `&T`.
+    ///
+    /// # Caller Responsibility
+    ///
+    /// Storing a value (even a `Copy` or `Clone` type) in the environment
+    /// context does not guarantee it remains fresh or in sync with external
+    /// state changes. The returned reference may be stale relative to the
+    /// caller's own domain model.
+    ///
+    /// Args:
+    ///     `cursor` (`Cursor`): The starting position for the search
+    ///     `symbol` (`Symbol`): The symbol identifier to resolve
+    ///
+    /// Returns:
+    ///     `Option<&T>`: A reference to the bound value if found, or `None`
+    pub fn find(&self, cursor: Cursor, symbol: Symbol) -> Option<&T> {
+        #[cfg(debug_assertions)]
+        if cursor.i.0 != 0 {
+            debug_assert!(
+                (cursor.i.0 as usize) <= self.block_arena.len(),
+                "Cursor block index out of bounds"
+            );
+            debug_assert!(
+                (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                    < self.region_arena.len(),
+                "Region index out of bounds"
+            );
+            debug_assert!(
+                self.block_is_live_in_region(cursor.i),
+                "find: cursor points to a block not live in its region \
+(stale or recycled)"
+            );
+        }
+        let mut curr = cursor.i;
+        while curr.0 != 0 {
+            let curr_val = curr.0;
+            let block_idx = (curr_val as usize) - 1;
+            let region_id = self.block_arena[block_idx].region;
+            let region_idx = region_id.0 as usize;
+            let region = &self.region_arena[region_idx];
+            if region.is_active {
+                if let Some(entry) = region.bindings.get(&(curr, symbol)) {
+                    return Some(entry);
+                }
+            }
+            curr = self.block_arena[block_idx].up;
+        }
+        None
     }
-  }
+
+    /// Binds a symbol to the cursor's current block with the given value.
+    ///
+    /// # Caller Responsibility
+    ///
+    /// Storing a value (even a `Copy` or `Clone` type) in the environment
+    /// context does not guarantee it remains fresh or in sync with external
+    /// state changes. The caller is responsible for the reference, copy, and
+    /// clone semantics of `T`.
+    ///
+    /// Args:
+    ///     `cursor` (`Cursor`): The position where the binding is created
+    ///     `symbol` (`Symbol`): The symbol identifier to bind
+    ///     `entry` (`T`): The value of type `T` to store
+    pub fn bind(&mut self, cursor: Cursor, symbol: Symbol, entry: T) {
+        #[cfg(debug_assertions)]
+        if cursor.i.0 != 0 {
+            debug_assert!(
+                (cursor.i.0 as usize) <= self.block_arena.len(),
+                "Cursor block index out of bounds"
+            );
+            debug_assert!(
+                (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                    < self.region_arena.len(),
+                "Region index out of bounds"
+            );
+            debug_assert!(
+                self.block_is_live_in_region(cursor.i),
+                "bind: cursor points to a block not live in its region \
+(stale or recycled)"
+            );
+        }
+        if cursor.i.0 != 0 {
+            let block_idx = (cursor.i.0 as usize) - 1;
+            let region_id = self.block_arena[block_idx].region;
+            let region_idx = region_id.0 as usize;
+            assert!(
+                self.region_arena[region_idx].is_active,
+                "Cannot bind symbol in an inactive region"
+            );
+            self.region_arena[region_idx]
+                .bindings
+                .insert((cursor.i, symbol), entry);
+        }
+    }
+
+    /// Allocates a new child block in the current block's region and moves down to it
+    pub fn push_block(&mut self, cursor: &mut Cursor) -> Option<()> {
+        #[cfg(debug_assertions)]
+        if cursor.i.0 != 0 {
+            debug_assert!(
+                (cursor.i.0 as usize) <= self.block_arena.len(),
+                "Cursor block index out of bounds"
+            );
+            debug_assert!(
+                (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                    < self.region_arena.len(),
+                "Region index out of bounds"
+            );
+            debug_assert!(
+                self.block_is_live_in_region(cursor.i),
+                "push_block: cursor points to a block not live in its region \
+(stale or recycled)"
+            );
+        }
+        if cursor.i.0 != 0 {
+            let current = cursor.i;
+            let block_idx = (current.0 as usize) - 1;
+            let region_id = self.block_arena[block_idx].region;
+            let region_idx = region_id.0 as usize;
+            assert!(
+                self.region_arena[region_idx].is_active,
+                "Cannot push block in an inactive region"
+            );
+            let new_block = self.alloc_block_in_region(region_id)?;
+
+            let down = self.block_arena[block_idx].down;
+            if down.0 == 0 {
+                self.block_arena[block_idx].down = new_block;
+                self.block_arena[block_idx].last_child = new_block;
+            } else {
+                let last = self.block_arena[block_idx].last_child;
+                if last.0 != 0 {
+                    let last_idx = (last.0 as usize) - 1;
+                    self.block_arena[last_idx].next = new_block;
+                } else {
+                    // Fallback if last_child was not set
+                    let mut sib = down;
+                    loop {
+                        let sib_idx = (sib.0 as usize) - 1;
+                        let next = self.block_arena[sib_idx].next;
+                        if next.0 == 0 {
+                            self.block_arena[sib_idx].next = new_block;
+                            break;
+                        }
+                        sib = next;
+                    }
+                }
+                self.block_arena[block_idx].last_child = new_block;
+            }
+            let new_idx = (new_block.0 as usize) - 1;
+            self.block_arena[new_idx].up = current;
+            cursor.i = new_block;
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Allocates a new child region nested under the parent cursor's current block
+    /// and moves the cursor into the root block of that region.
+    pub fn push_region(&mut self, cursor: &mut Cursor) -> Option<RegionId> {
+        if cursor.i.0 != 0 {
+            debug_assert!(
+                (cursor.i.0 as usize) <= self.block_arena.len(),
+                "Cursor block index out of bounds"
+            );
+            debug_assert!(
+                (self.block_arena[(cursor.i.0 as usize) - 1].region.0 as usize)
+                    < self.region_arena.len(),
+                "Region index out of bounds"
+            );
+            #[cfg(debug_assertions)]
+            {
+                debug_assert!(
+                    self.block_is_live_in_region(cursor.i),
+                    "push_region: cursor points to a block not live in its region \
+(stale or recycled)"
+                );
+            }
+            let block_idx = (cursor.i.0 as usize) - 1;
+            let region_idx = self.block_arena[block_idx].region.0 as usize;
+            assert!(
+                self.region_arena[region_idx].is_active,
+                "Cannot push region in an inactive region"
+            );
+            let parent = cursor.i;
+            let region_id = self.region_alloc_child(1, parent)?;
+            debug_assert!(
+                !self.region_arena[region_id.0 as usize].intervals.is_empty(),
+                "intervals must not be empty after successful child region allocation"
+            );
+            let root = self.region_arena[region_id.0 as usize]
+                .intervals
+                .first()
+                .unwrap()
+                .begin;
+            cursor.i = root;
+            Some(region_id)
+        } else {
+            None
+        }
+    }
+
+    /// Allocates a child region nested under a parent block scope.
+    ///
+    /// Args:
+    ///     `size` (`u32`): The number of blocks requested for the region
+    ///     `parent` (`BlockId`): The parent block scope identifier
+    ///
+    /// Returns:
+    ///     `RegionId`: The allocated child region identifier
+    fn region_alloc_child(&mut self, size: u32, parent: BlockId) -> Option<RegionId> {
+        debug_assert!(size > 0, "region_alloc_child: size must be > 0");
+        let region_id = self.region_alloc(size)?;
+        debug_assert!(
+            !self.region_arena[region_id.0 as usize].intervals.is_empty(),
+            "region_alloc_child: region has no intervals after alloc; implementation error"
+        );
+        let root = self.region_arena[region_id.0 as usize]
+            .intervals
+            .first()
+            .unwrap()
+            .begin;
+        self.link_up(root, parent);
+
+        if (parent.0 != 0) && ((parent.0 as usize) <= (self.block_arena.len())) {
+            let p_idx = (parent.0 as usize) - 1;
+            let down = self.block_arena[p_idx].down;
+            if down.0 == 0 {
+                self.link_down(parent, root);
+            } else {
+                let last = self.block_arena[p_idx].last_child;
+                if last.0 != 0 {
+                    self.link_next(last, root);
+                } else {
+                    // Fallback if last_child was not set
+                    let mut sib = down;
+                    loop {
+                        let sib_idx = (sib.0 as usize) - 1;
+                        let next = self.block_arena[sib_idx].next;
+                        if next.0 == 0 {
+                            self.link_next(sib, root);
+                            break;
+                        }
+                        sib = next;
+                    }
+                }
+                self.link_last_child(parent, root);
+            }
+        }
+        Some(region_id)
+    }
+
+    /// Returns the size of the allocated region.
+    ///
+    /// Args:
+    ///     `id` (`RegionId`): The region identifier to inspect
+    ///
+    /// Returns:
+    ///     `Option<u32>`: The total size of the region if valid
+    pub fn region_size(&self, id: RegionId) -> Option<u32> {
+        let idx = id.0 as usize;
+        if idx < (self.region_arena.len()) {
+            let r = &self.region_arena[idx];
+            if !r.is_active {
+                return None;
+            }
+            let mut total = 0u32;
+            for interval in &r.intervals {
+                debug_assert!(
+                    interval.end.0 >= interval.begin.0,
+                    "interval invariant violated"
+                );
+                total += (interval.end.0) - (interval.begin.0);
+            }
+            if total > 0 {
+                return Some(total);
+            }
+        }
+        None
+    }
+
+    /// Returns the total capacity of the backing block array.
+    ///
+    /// Returns:
+    ///     `usize`: The total number of allocated backing blocks
+    pub fn blocks_capacity(&self) -> usize {
+        self.block_arena.len()
+    }
+
+    /// Returns whether a block is currently live within its owning region.
+    ///
+    /// Validates that the block is non-null, in bounds, its recorded
+    /// `region` is active, and falls within the region's active interval
+    /// range (bounded by `active_interval_used` on the last interval).
+    /// Used by `debug_assert!` guards in `bind`, `push_block`, and `find`
+    /// to catch stale or recycled cursor misuse in debug builds.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The block identifier to check
+    ///
+    /// Returns:
+    ///     `bool`: `true` iff the block is live in its region's active range
+    #[inline]
+    fn block_is_live_in_region(&self, block: BlockId) -> bool {
+        if (block.0 == 0) || ((block.0 as usize) > (self.block_arena.len())) {
+            return false;
+        }
+        let region_id = self.block_arena[(block.0 as usize) - 1].region;
+        let region_idx = region_id.0 as usize;
+        if region_idx >= self.region_arena.len() {
+            return false;
+        }
+        let region = &self.region_arena[region_idx];
+        if !region.is_active {
+            return false;
+        }
+        for (i, interval) in region.intervals.iter().enumerate() {
+            let is_last = i == (region.intervals.len() - 1);
+            let limit = if is_last {
+                interval.begin.0 + region.active_interval_used
+            } else {
+                interval.end.0
+            };
+            if block.0 >= interval.begin.0 && block.0 < limit {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Returns the region identifier of a block.
+    ///
+    /// Delegates to `block_is_live_in_region` for the membership check and
+    /// then returns the owning `RegionId`. Exposed only in test builds.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The block identifier to inspect
+    ///
+    /// Returns:
+    ///     `Option<RegionId>`: The owning region identifier if the block is
+    ///         live in an active region, or `None` otherwise
+    #[cfg(test)]
+    fn get_region_id_from_block(&self, block: BlockId) -> Option<RegionId> {
+        if !self.block_is_live_in_region(block) {
+            return None;
+        }
+        let region_id = self.block_arena[(block.0 as usize) - 1].region;
+        Some(region_id)
+    }
+
+    /// Returns the number of items in the block freelist.
+    ///
+    /// Returns:
+    ///     `usize`: The length of the block freelist
+    pub fn block_freelist_len(&self) -> usize {
+        self.allocator.block_freelist.len()
+    }
+
+    /// Returns boundaries of a freed block interval at the given index.
+    ///
+    /// Args:
+    ///     `idx` (`usize`): The index into the block freelist
+    ///
+    /// Returns:
+    ///     `Option<(BlockId, BlockId)>`: The boundaries of the interval
+    #[cfg(test)]
+    fn block_freelist_interval(&self, idx: usize) -> Option<(BlockId, BlockId)> {
+        self.allocator
+            .block_freelist
+            .get(idx)
+            .map(|r| (r.begin, r.end))
+    }
+
+    /// Links a block to its parent scope.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The block identifier to link
+    ///     `parent` (`BlockId`): The parent block identifier
+    fn link_up(&mut self, block: BlockId, parent: BlockId) {
+        if ((block.0) != 0) && ((block.0 as usize) <= (self.block_arena.len())) {
+            self.block_arena[(block.0 as usize) - 1].up = parent;
+        }
+    }
+
+    /// Links a block to its first nested child scope.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The parent block identifier
+    ///     `child` (`BlockId`): The child block identifier
+    fn link_down(&mut self, block: BlockId, child: BlockId) {
+        if ((block.0) != 0) && ((block.0 as usize) <= (self.block_arena.len())) {
+            self.block_arena[(block.0 as usize) - 1].down = child;
+            self.block_arena[(block.0 as usize) - 1].last_child = child;
+        }
+    }
+
+    /// Links a block to its last nested child scope.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The parent block identifier
+    ///     `last_child` (`BlockId`): The last child block identifier
+    fn link_last_child(&mut self, block: BlockId, last_child: BlockId) {
+        if ((block.0) != 0) && ((block.0 as usize) <= (self.block_arena.len())) {
+            self.block_arena[(block.0 as usize) - 1].last_child = last_child;
+        }
+    }
+
+    /// Links a block to its next sibling scope.
+    ///
+    /// Args:
+    ///     `block` (`BlockId`): The block identifier to link
+    ///     `next` (`BlockId`): The sibling block identifier
+    fn link_next(&mut self, block: BlockId, next: BlockId) {
+        if ((block.0) != 0) && ((block.0 as usize) <= (self.block_arena.len())) {
+            self.block_arena[(block.0 as usize) - 1].next = next;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  /// Verifies backing block capacity matches the allocated size
-  #[test]
-  fn test_backing_space_complexity_monotone_frontiers() {
-    let mut context = Context::new();
-    let r1 = context.region_alloc(10).unwrap();
-    assert_eq!(context.block_arena.len(), 10);
-    context.region_free(r1);
-  }
+    /// Verifies backing block capacity matches the allocated size
+    #[test]
+    fn test_backing_space_complexity_monotone_frontiers() {
+        let mut context = Context::<u32>::new();
+        let r1 = context.region_alloc(10).unwrap();
+        assert_eq!(context.block_arena.len(), 10);
+        context.region_free(r1);
+    }
 
-  /// Verifies `O(1)` swap-remove logic during freelist reclamation
-  #[test]
-  fn test_freelist_swap_remove_o1_complexity() {
-    let mut context = Context::new();
-    let r_a = context.region_alloc(5).unwrap();
-    let sep1 = context.region_alloc(1).unwrap();
-    let r_b = context.region_alloc(15).unwrap();
-    let sep2 = context.region_alloc(1).unwrap();
-    let r_c = context.region_alloc(25).unwrap();
+    /// Verifies `O(1)` swap-remove logic during freelist reclamation
+    #[test]
+    fn test_freelist_swap_remove_o1_complexity() {
+        let mut context = Context::<u32>::new();
+        let r_a = context.region_alloc(5).unwrap();
+        let sep1 = context.region_alloc(1).unwrap();
+        let r_b = context.region_alloc(15).unwrap();
+        let sep2 = context.region_alloc(1).unwrap();
+        let r_c = context.region_alloc(25).unwrap();
 
-    context.region_free(r_a);
-    context.region_free(r_b);
-    context.region_free(r_c);
+        context.region_free(r_a);
+        context.region_free(r_b);
+        context.region_free(r_c);
 
-    assert_eq!(context.allocator.block_freelist.len(), 3);
-    assert_eq!(context.allocator.block_freelist[0].begin.0, 1);
-    assert_eq!(context.allocator.block_freelist[1].begin.0, 7);
-    assert_eq!(context.allocator.block_freelist[2].begin.0, 23);
+        assert_eq!(context.allocator.block_freelist.len(), 3);
+        assert_eq!(context.allocator.block_freelist[0].begin.0, 1);
+        assert_eq!(context.allocator.block_freelist[1].begin.0, 7);
+        assert_eq!(context.allocator.block_freelist[2].begin.0, 23);
 
-    let r_alloc = context.region_alloc(12).unwrap();
+        let r_alloc = context.region_alloc(12).unwrap();
 
-    assert_eq!(context.allocator.block_freelist.len(), 3);
-    assert_eq!(context.allocator.block_freelist[1].begin.0, 23);
+        assert_eq!(context.allocator.block_freelist.len(), 3);
+        assert_eq!(context.allocator.block_freelist[1].begin.0, 23);
 
-    context.region_free(sep1);
-    context.region_free(sep2);
-    context.region_free(r_alloc);
-  }
+        context.region_free(sep1);
+        context.region_free(sep2);
+        context.region_free(r_alloc);
+    }
 
-  /// Verifies default initialization and derives for handle types
-  #[test]
-  fn test_struct_derives_and_defaults() {
-    assert_eq!(RegionId::default(), RegionId(0));
-    assert_eq!(Symbol::default(), Symbol(0));
-    assert_eq!(EntryId::default(), EntryId(0));
-    assert_eq!(BlockId::default(), BlockId(0));
-  }
+    /// Verifies default initialization and derives for handle types
+    #[test]
+    fn test_struct_derives_and_defaults() {
+        assert_eq!(RegionId::default(), RegionId(0));
+        assert_eq!(Symbol::default(), Symbol(0));
+        assert_eq!(BlockId::default(), BlockId(0));
+    }
 
-  /// Verifies exact-match block range reuse from the freelist
-  #[test]
-  fn test_alloc_block_range_exact_match() {
-    let mut context = Context::new();
-    let r1 = context.region_alloc(10).unwrap();
-    context.region_free(r1);
-    
-    let r2 = context.region_alloc(10).unwrap();
-    assert_eq!(r2.0, 0);
-  }
+    /// Verifies exact-match block range reuse from the freelist
+    #[test]
+    fn test_alloc_block_range_exact_match() {
+        let mut context = Context::<u32>::new();
+        let r1 = context.region_alloc(10).unwrap();
+        context.region_free(r1);
 
-  /// Verifies partial-match block range splitting and remainder tracking
-  #[test]
-  fn test_alloc_block_range_partial_match() {
-    let mut context = Context::new();
-    let r1 = context.region_alloc(10).unwrap();
-    context.region_free(r1);
-    
-    let _r2 = context.region_alloc(6).unwrap();
-    assert_eq!(context.block_freelist_len(), 1);
-    assert_eq!(context.block_freelist_interval(0).unwrap().0.0, 7);
-    assert_eq!(context.block_freelist_interval(0).unwrap().1.0, 11);
-  }
+        let r2 = context.region_alloc(10).unwrap();
+        assert_eq!(r2.0, 0);
+    }
 
-  /// Verifies region identifier recycling on allocation
-  #[test]
-  fn test_region_freelist_reuse() {
-    let mut context = Context::new();
-    let r1 = context.region_alloc(5).unwrap();
-    let _r2 = context.region_alloc(5).unwrap();
-    
-    context.region_free(r1);
-    let r3 = context.region_alloc(5).unwrap();
-    assert_eq!(r3, r1);
-  }
+    /// Verifies partial-match block range splitting and remainder tracking
+    #[test]
+    fn test_alloc_block_range_partial_match() {
+        let mut context = Context::<u32>::new();
+        let r1 = context.region_alloc(10).unwrap();
+        context.region_free(r1);
 
-  /// Verifies error handling when freeing non-existent region identifiers
-  #[test]
-  fn test_region_free_invalid_id() {
-    let mut context = Context::new();
-    context.region_free(RegionId(999));
-  }
+        let _r2 = context.region_alloc(6).unwrap();
+        assert_eq!(context.block_freelist_len(), 1);
+        assert_eq!(context.block_freelist_interval(0).unwrap().0 .0, 7);
+        assert_eq!(context.block_freelist_interval(0).unwrap().1 .0, 11);
+    }
 
-  /// Verifies cursor creation checks on out-of-bounds region handles
-  #[test]
-  fn test_iterators_invalid_region() {
-    let context = Context::new();
-    assert!(context.cursor(RegionId(999)).is_none());
-  }
+    /// Verifies region identifier recycling on allocation
+    #[test]
+    fn test_region_freelist_reuse() {
+        let mut context = Context::<u32>::new();
+        let r1 = context.region_alloc(5).unwrap();
+        let _r2 = context.region_alloc(5).unwrap();
 
-  /// Verifies safety checks on invalid block or region identifiers
-  #[test]
-  fn test_introspection_invalid_inputs() {
-    let context = Context::new();
-    assert_eq!(context.region_size(RegionId(999)), None);
-    assert_eq!(context.get_region_id_from_block(BlockId(999)), None);
-    assert_eq!(context.get_region_id_from_block(BlockId(0)), None);
-    assert_eq!(context.block_freelist_interval(999), None);
-  }
+        context.region_free(r1);
+        let r3 = context.region_alloc(5).unwrap();
+        assert_eq!(r3, r1);
+    }
 
-  /// Verifies nested region linking when the parent block is invalid
-  #[test]
-  fn test_region_alloc_child_invalid_parent() {
-    let mut context = Context::new();
-    let _r = context.region_alloc_child(2, BlockId(0)).unwrap();
-    assert_eq!(context.block_arena[0].up.0, 0);
-    
-    let r2 = context.region_alloc_child(2, BlockId(999)).unwrap();
-    assert_eq!(context.get_region_id_from_block(BlockId(3)), Some(r2));
-  }
+    /// Verifies error handling when freeing non-existent region identifiers
+    #[test]
+    fn test_region_free_invalid_id() {
+        let mut context = Context::<u32>::new();
+        context.region_free(RegionId(999));
+    }
 
-  /// Verifies that `region_alloc_child` panics on zero size (caller contract)
-  #[test]
-  #[should_panic(expected = "size must be > 0")]
-  fn test_region_alloc_child_zero_size_panics() {
-    let mut context = Context::new();
-    context.region_alloc_child(0, BlockId(0));
-  }
+    /// Verifies cursor creation checks on out-of-bounds region handles
+    #[test]
+    fn test_iterators_invalid_region() {
+        let context = Context::<u32>::new();
+        assert!(context.cursor(RegionId(999)).is_none());
+    }
 
-  /// Verifies disjoint range allocation when active interval is full
-  /// and confirms that coalescing merges contiguous allocations.
-  #[test]
-  fn test_alloc_block_in_region_disjoint_allocation() {
-    let mut context = Context::new();
-    let r = context.region_alloc(2).unwrap();
-    let mut cursor = context.cursor(r).unwrap();
-    
-    // Within capacity (size 2), creates Block 2
-    context.push_block(&mut cursor).unwrap();
-    assert_eq!(cursor.i.0, 2);
-    
-    // Out of capacity, allocates a new block (3). Since it's contiguous, it coalesces.
-    context.push_block(&mut cursor).unwrap();
-    assert_eq!(cursor.i.0, 3);
-    assert_eq!(context.region_size(r), Some(3));
-    
-    // Verify that coalescing kept the number of intervals as 1
-    assert_eq!(context.region_arena[r.0 as usize].intervals.len(), 1);
-  }
+    /// Verifies safety checks on invalid block or region identifiers
+    #[test]
+    fn test_introspection_invalid_inputs() {
+        let context = Context::<u32>::new();
+        assert_eq!(context.region_size(RegionId(999)), None);
+        assert_eq!(context.get_region_id_from_block(BlockId(999)), None);
+        assert_eq!(context.get_region_id_from_block(BlockId(0)), None);
+        assert_eq!(context.block_freelist_interval(999), None);
+    }
 
-  /// Verifies size introspection behavior on empty regions
-  #[test]
-  fn test_zero_sized_region_size_introspection() {
-    let mut context = Context::new();
-    let r = context.region_alloc(0);
-    assert!(r.is_none());
-  }
+    /// Verifies nested region linking when the parent block is invalid
+    #[test]
+    fn test_region_alloc_child_invalid_parent() {
+        let mut context = Context::<u32>::new();
+        let _r = context.region_alloc_child(2, BlockId(0)).unwrap();
+        assert_eq!(context.block_arena[0].up.0, 0);
 
-  /// Verifies that double freeing a region panics.
-  #[test]
-  #[should_panic(expected = "Double free of RegionId")]
-  fn test_region_double_free() {
-    let mut context = Context::new();
-    let r = context.region_alloc(5).unwrap();
-    context.region_free(r);
-    context.region_free(r);
-  }
+        let r2 = context.region_alloc_child(2, BlockId(999)).unwrap();
+        assert_eq!(context.get_region_id_from_block(BlockId(3)), Some(r2));
+    }
 
-  /// Verifies that looking up the owning region of a block in a freed region returns None.
-  #[test]
-  fn test_freed_block_region_resolution() {
-    let mut context = Context::new();
-    let r = context.region_alloc(5).unwrap();
-    let cursor = context.cursor(r).unwrap();
-    let block = cursor.i;
-    assert_eq!(context.get_region_id_from_block(block), Some(r));
-    context.region_free(r);
-    assert_eq!(context.get_region_id_from_block(block), None);
-  }
+    /// Verifies that `region_alloc_child` panics on zero size (caller contract)
+    #[test]
+    #[should_panic(expected = "size must be > 0")]
+    fn test_region_alloc_child_zero_size_panics() {
+        let mut context = Context::<u32>::new();
+        context.region_alloc_child(0, BlockId(0));
+    }
+
+    /// Verifies disjoint range allocation when active interval is full
+    /// and confirms that coalescing merges contiguous allocations.
+    #[test]
+    fn test_alloc_block_in_region_disjoint_allocation() {
+        let mut context = Context::<u32>::new();
+        let r = context.region_alloc(2).unwrap();
+        let mut cursor = context.cursor(r).unwrap();
+
+        // Within capacity (size 2), creates Block 2
+        context.push_block(&mut cursor).unwrap();
+        assert_eq!(cursor.i.0, 2);
+
+        // Out of capacity, allocates a new block (3). Since it's contiguous, it coalesces.
+        context.push_block(&mut cursor).unwrap();
+        assert_eq!(cursor.i.0, 3);
+        assert_eq!(context.region_size(r), Some(3));
+
+        // Verify that coalescing kept the number of intervals as 1
+        assert_eq!(context.region_arena[r.0 as usize].intervals.len(), 1);
+    }
+
+    /// Verifies size introspection behavior on empty regions
+    #[test]
+    fn test_zero_sized_region_size_introspection() {
+        let mut context = Context::<u32>::new();
+        let r = context.region_alloc(0);
+        assert!(r.is_none());
+    }
+
+    /// Verifies that double freeing a region panics.
+    #[test]
+    #[should_panic(expected = "Double free of RegionId")]
+    fn test_region_double_free() {
+        let mut context = Context::<u32>::new();
+        let r = context.region_alloc(5).unwrap();
+        context.region_free(r);
+        context.region_free(r);
+    }
+
+    /// Verifies that looking up the owning region of a block in a freed region returns None.
+    #[test]
+    fn test_freed_block_region_resolution() {
+        let mut context = Context::<u32>::new();
+        let r = context.region_alloc(5).unwrap();
+        let cursor = context.cursor(r).unwrap();
+        let block = cursor.i;
+        assert_eq!(context.get_region_id_from_block(block), Some(r));
+        context.region_free(r);
+        assert_eq!(context.get_region_id_from_block(block), None);
+    }
+
+    /// Verifies that block region and structural links are reset when a range is reused.
+    #[test]
+    fn test_reused_block_region_resolution() {
+        let mut context = Context::<u32>::new();
+        let r1 = context.region_alloc(3).unwrap();
+        let mut cursor = context.cursor(r1).unwrap();
+        context.push_block(&mut cursor).unwrap(); // BlockId(2)
+        context.push_block(&mut cursor).unwrap(); // BlockId(3)
+        context.region_free(r1);
+
+        let _r2 = context.region_alloc(3).unwrap();
+        // Since the block range is reused, BlockId(2) and BlockId(3) should be zeroed/reset.
+        // Therefore, their region must not be resolved to r2 (since they are not active in r2 yet),
+        // and their parent/sibling links must be cleared.
+        assert_eq!(context.get_region_id_from_block(BlockId(2)), None);
+        assert_eq!(context.get_region_id_from_block(BlockId(3)), None);
+    }
+
+    /// Verifies that `block_is_live_in_region` returns `false` for a stale
+    /// cursor after its region has been freed and the RegionId recycled.
+    ///
+    /// This is the exact scenario the reviewer raised: a `Cursor` retained
+    /// across `region_free` must not appear live even when the same
+    /// `RegionId` slot is reassigned to a new region. The
+    /// `debug_assert!` guards in `bind`, `push_block`, and `find` all
+    /// delegate to `block_is_live_in_region`, so this test covers all three.
+    ///
+    /// The stale cursor is advanced to a non-root block inside `r1` before
+    /// freeing; that block falls outside `r2`'s `active_interval_used = 1`
+    /// window and must therefore read as not live, even though the recycled
+    /// region slot and block range are identical
+    #[test]
+    fn test_stale_cursor_after_region_recycle() {
+        let mut context = Context::<u32>::new();
+
+        // Allocate r1 with capacity for multiple blocks and advance the
+        // cursor into a non-root child block so the stale handle points
+        // somewhere that will not be the root of the recycled region
+        let r1 = context.region_alloc(5).unwrap();
+        let mut stale = context.cursor(r1).unwrap();
+        context.push_block(&mut stale).unwrap(); // now points at BlockId(2)
+
+        // Free r1 — stale cursor is now dangling
+        context.region_free(r1);
+
+        // Allocate r2 with size 1 so that the allocator recycles the same
+        // RegionId slot but only activates the root block (active_interval_used = 1).
+        // BlockId(2) is therefore outside r2's live window
+        let r2 = context.region_alloc(1).unwrap();
+        assert_eq!(
+            r2, r1,
+            "RegionId must be recycled for this test to be meaningful"
+        );
+
+        // The stale cursor's block (BlockId(2)) must not appear live in r2
+        // because r2 only activated its root block (BlockId(1))
+        assert!(
+            !context.block_is_live_in_region(stale.i),
+            "stale cursor must not appear live in the recycled region"
+        );
+    }
 }
